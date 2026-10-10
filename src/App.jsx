@@ -8,7 +8,7 @@ import {
   Trash2, Package, TrendingUp, TrendingDown, Minus,
   Upload, Download, Save, X, ChevronLeft, ChevronRight as ChevronRightIcon, Boxes,
   FileText, Copy, Check, StickyNote, Wallet, Megaphone, Pencil,
-  CreditCard, Landmark, Users, CalendarDays, LayoutGrid, Wifi, WifiOff
+  CreditCard, Landmark, Users, CalendarDays, LayoutGrid, Wifi, WifiOff, LogOut, Lock, Settings
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -307,6 +307,10 @@ const seedChecklist = () => ([
 ]);
 
 const seedBudget = () => 8000000;
+
+// 탭(메뉴) 표시/숨김 설정 — key가 없으면 기본값은 "보임". false로 저장된 탭만 사이드바에서 숨겨짐.
+// 모든 팀원에게 동일하게 적용되는 전체 공통 설정입니다.
+const seedTabSettings = () => ({});
 
 const seedCeoNotes = () => ([
   { id: uid(), date: "2026-08-14", text: "이번달 물류비 절감안 다음주까지 정리해서 보고" },
@@ -2670,8 +2674,112 @@ function PartnerMaster({ partners, setPartners }) {
   );
 }
 
-/* ----------------------------------- App ----------------------------------- */
-export default function App() {
+/* --------------------------------- 설정 (탭 표시/숨김) --------------------------------- */
+function SettingsTab({ tabSettings, setTabSettings, allNavItems }) {
+  const toggle = (key) => {
+    setTabSettings(prev => {
+      const cur = prev[key] !== false; // 기본값 true(보임)
+      return { ...prev, [key]: !cur };
+    });
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <SectionTitle icon={Settings} title="설정" sub="사이드바에 표시할 탭(메뉴)을 선택하세요. 여기서 끄면 모든 팀원 화면에서 함께 숨겨집니다." />
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>메뉴 표시 설정</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          {allNavItems.filter(n => n.key !== "settings").map(n => {
+            const Icon = n.icon;
+            const visible = tabSettings[n.key] !== false;
+            return (
+              <div key={n.key} style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+                padding: "10px 4px", borderBottom: "1px solid #F5F6F3",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <Icon size={16} color={C.sub} />
+                  <span style={{ fontSize: 13 }}>{n.label}</span>
+                </div>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                  <span style={{ fontSize: 11.5, color: visible ? C.primary : C.faint, fontWeight: 700 }}>
+                    {visible ? "표시됨" : "숨김"}
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={visible}
+                    onChange={() => toggle(n.key)}
+                    style={{ width: 16, height: 16, cursor: "pointer", accentColor: C.primary }}
+                  />
+                </label>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+/* ----------------------------------- 로그인 화면 ----------------------------------- */
+function LoginGate() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!email || !password) return;
+    setBusy(true);
+    setErr("");
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    setBusy(false);
+    if (error) {
+      setErr(error.message === "Invalid login credentials" ? "이메일 또는 비밀번호가 올바르지 않습니다." : error.message);
+    }
+  };
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "center",
+      minHeight: 640, fontFamily: FONT, background: C.bg, borderRadius: 16,
+      border: `1px solid ${C.border}`,
+    }}>
+      <form onSubmit={submit} style={{
+        width: 320, display: "flex", flexDirection: "column", gap: 12,
+        background: "#fff", border: `1px solid ${C.border}`, borderRadius: 14,
+        padding: "32px 28px", boxShadow: "0 2px 18px rgba(0,0,0,0.05)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, justifyContent: "center" }}>
+          <Package size={20} color={C.primary} />
+          <div style={{ fontWeight: 800, fontSize: 15 }}>엘티에프포유 ERP</div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "center", color: C.faint, fontSize: 11.5, marginBottom: 8 }}>
+          <Lock size={12} /> 팀원 계정으로 로그인하세요
+        </div>
+        <div>
+          <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>이메일</div>
+          <input type="email" autoFocus value={email} onChange={e => setEmail(e.target.value)} style={{ ...inputStyle, width: "100%" }} placeholder="name@company.com" />
+        </div>
+        <div>
+          <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>비밀번호</div>
+          <input type="password" value={password} onChange={e => setPassword(e.target.value)} style={{ ...inputStyle, width: "100%" }} placeholder="••••••••" />
+        </div>
+        {err && <div style={{ fontSize: 11.5, color: "#D1495B" }}>{err}</div>}
+        <button type="submit" disabled={busy} style={{ ...btnPrimary, justifyContent: "center", marginTop: 4, opacity: busy ? 0.7 : 1 }}>
+          {busy ? "로그인 중..." : "로그인"}
+        </button>
+        <div style={{ fontSize: 10.5, color: C.faint, textAlign: "center", marginTop: 4 }}>
+          계정이 없으신가요? 관리자에게 문의해주세요.
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* ----------------------------------- App 내부(로그인 이후) ----------------------------------- */
+function AppShell({ userEmail, onSignOut }) {
   const [tab, setTab] = useState("dashboard");
 
   const [inventory, setInventory, r1] = useSyncedState("erp:inventory", seedInventory);
@@ -2691,8 +2799,9 @@ export default function App() {
   const [ceoNotes, setCeoNotes, r15] = useSyncedState("erp:ceoNotes", seedCeoNotes);
   const [myNotes, setMyNotes, r16] = useSyncedState("erp:myNotes", seedMyNotes);
   const [partners, setPartners, r17] = useSyncedState("erp:partners", seedPartners);
+  const [tabSettings, setTabSettings, r18] = useSyncedState("erp:tabSettings", seedTabSettings);
 
-  const loading = !(r1 && r2 && r3 && r4 && r5 && r6 && r7 && r8 && r9 && r10 && r11 && r12 && r13 && r14 && r15 && r16 && r17);
+  const loading = !(r1 && r2 && r3 && r4 && r5 && r6 && r7 && r8 && r9 && r10 && r11 && r12 && r13 && r14 && r15 && r16 && r17 && r18);
 
   const navItems = [
     { key: "dashboard", label: "대시보드", icon: LayoutDashboard },
@@ -2703,7 +2812,9 @@ export default function App() {
     { key: "checklist", label: "업무체크리스트", icon: ClipboardCheck },
     { key: "okr", label: "분기목표(OKR)", icon: Target },
     { key: "report", label: "대표님 보고", icon: FileText },
+    { key: "settings", label: "설정", icon: Settings },
   ];
+  const visibleNavItems = navItems.filter(n => n.key === "settings" || tabSettings[n.key] !== false);
 
   if (loading) {
     return (
@@ -2733,7 +2844,7 @@ export default function App() {
             {SUPABASE_READY ? "팀 공유 데이터 연결됨" : "이 브라우저에만 저장 중"}
           </span>
         </div>
-        {navItems.map(n => {
+        {visibleNavItems.map(n => {
           const Icon = n.icon;
           const active = tab === n.key;
           return (
@@ -2748,8 +2859,19 @@ export default function App() {
           );
         })}
         <div style={{ marginTop: "auto", padding: "12px 8px 0", borderTop: "1px solid rgba(255,255,255,0.12)" }}>
-          <div style={{ color: "#fff", fontSize: 12.5, fontWeight: 700 }}>정재연 과장</div>
-          <div style={{ color: "#9FB6A6", fontSize: 11 }}>운영관리팀</div>
+          <div style={{ color: "#fff", fontSize: 12.5, fontWeight: 700 }}>운영관리팀</div>
+          {userEmail && (
+            <div style={{ color: "#9FB6A6", fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{userEmail}</div>
+          )}
+          {onSignOut && (
+            <button onClick={onSignOut} style={{
+              display: "flex", alignItems: "center", gap: 6, marginTop: 8, padding: "6px 8px",
+              background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 7, cursor: "pointer",
+              color: "#C9DBCE", fontSize: 11, width: "100%",
+            }}>
+              <LogOut size={12} /> 로그아웃
+            </button>
+          )}
         </div>
       </div>
 
@@ -2763,7 +2885,48 @@ export default function App() {
         {tab === "checklist" && <ChecklistTab checklist={checklist} setChecklist={setChecklist} />}
         {tab === "okr" && <OkrTab okrs={okrs} setOkrs={setOkrs} />}
         {tab === "report" && <ReportTab reports={reports} setReports={setReports} todos={todos} sales={sales} deposits={deposits} inventory={inventory} />}
+        {tab === "settings" && <SettingsTab tabSettings={tabSettings} setTabSettings={setTabSettings} allNavItems={navItems} />}
       </div>
     </div>
+  );
+}
+
+/* ----------------------------------- App (로그인 게이트) ----------------------------------- */
+export default function App() {
+  // SUPABASE_READY가 false면(아직 환경변수 미설정) 로그인 없이 로컬 전용 모드로 바로 진입
+  const [session, setSession] = useState(SUPABASE_READY ? undefined : null);
+
+  useEffect(() => {
+    if (!SUPABASE_READY) return;
+    let mounted = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (mounted) setSession(data.session);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, sess) => {
+      setSession(sess);
+    });
+    return () => {
+      mounted = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+
+  if (session === undefined) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 500, fontFamily: FONT, color: C.faint }}>
+        로그인 확인 중...
+      </div>
+    );
+  }
+
+  if (SUPABASE_READY && !session) {
+    return <LoginGate />;
+  }
+
+  return (
+    <AppShell
+      userEmail={session ? session.user.email : null}
+      onSignOut={SUPABASE_READY ? () => supabase.auth.signOut() : null}
+    />
   );
 }
