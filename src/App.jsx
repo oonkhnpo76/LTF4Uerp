@@ -2687,9 +2687,12 @@ function SettingsTab({ tabSettings, setTabSettings, allNavItems }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <SectionTitle icon={Settings} title="설정" sub="사이드바에 표시할 탭(메뉴)을 선택하세요. 여기서 끄면 모든 팀원 화면에서 함께 숨겨집니다." />
       <Card>
-        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>메뉴 표시 설정</div>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 2 }}>메뉴 표시 설정</div>
+        <div style={{ fontSize: 11, color: C.faint, marginBottom: 12 }}>
+          "설정" 탭도 숨길 수 있어요. 숨긴 뒤 다시 열고 싶으면, 사이드바 맨 위 로고(엘티에프포유 ERP)를 클릭하세요.
+        </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          {allNavItems.filter(n => n.key !== "settings").map(n => {
+          {allNavItems.map(n => {
             const Icon = n.icon;
             const visible = tabSettings[n.key] !== false;
             return (
@@ -2814,7 +2817,7 @@ function AppShell({ userEmail, onSignOut }) {
     { key: "report", label: "대표님 보고", icon: FileText },
     { key: "settings", label: "설정", icon: Settings },
   ];
-  const visibleNavItems = navItems.filter(n => n.key === "settings" || tabSettings[n.key] !== false);
+  const visibleNavItems = navItems.filter(n => tabSettings[n.key] !== false);
 
   if (loading) {
     return (
@@ -2828,7 +2831,11 @@ function AppShell({ userEmail, onSignOut }) {
     <div style={{ display: "flex", fontFamily: FONT, background: C.bg, minHeight: 640, borderRadius: 16, overflow: "hidden", border: `1px solid ${C.border}` }}>
       {/* 사이드바 */}
       <div style={{ width: 200, background: C.primaryDark, padding: "22px 14px", display: "flex", flexDirection: "column", gap: 4 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 8px 14px" }}>
+        <div
+          onClick={() => setTab("settings")}
+          title="설정 탭이 안 보이면 여기를 클릭하세요"
+          style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 8px 14px", cursor: "pointer" }}
+        >
           <Package size={20} color="#fff" />
           <div>
             <div style={{ color: "#fff", fontWeight: 800, fontSize: 14 }}>엘티에프포유 ERP</div>
