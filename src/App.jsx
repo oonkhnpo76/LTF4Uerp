@@ -277,9 +277,9 @@ const seedTodos = () => ([
 ]);
 
 const PERIODS = ["일일", "주간", "월간"];
-const DEPTS = ["회계", "물류", "인사"];
+const DEPTS = ["인사", "회계", "물류", "세금", "기타"];
 const PERIOD_COLORS = { 일일: C.primary, 주간: C.amber, 월간: C.purple };
-const DEPT_COLORS = { 회계: C.amber, 물류: C.primary, 인사: C.navy };
+const DEPT_COLORS = { 인사: C.navy, 회계: C.amber, 물류: C.primary, 세금: C.red, 기타: C.chestnut };
 
 const seedChecklist = () => ([
   { id: uid(), date: "2026-08-10", period: "일일", dept: "물류", timeSlot: "08:30~09:00", category: "당일 운영", task: "오늘 입고 예정 / 출고 예정 / 긴급 요청 확인", done: true, memo: "", priority: "상", assignee: "정재연 과장" },
@@ -2148,7 +2148,7 @@ function ChecklistTab({ checklist, setChecklist }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <SectionTitle icon={ClipboardCheck} title="업무 체크리스트" sub="기간(일일·주간·월간) → 부서(회계·물류·인사) 마인드맵" />
+      <SectionTitle icon={ClipboardCheck} title="업무 체크리스트" sub="기간(일일·주간·월간) → 구분(인사·회계·물류·세금·기타) 마인드맵" />
 
       <Card>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
