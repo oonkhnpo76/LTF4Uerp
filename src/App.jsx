@@ -308,10 +308,6 @@ const seedChecklist = () => ([
 
 const seedBudget = () => 8000000;
 
-// 탭(메뉴) 표시/숨김 설정 — key가 없으면 기본값은 "보임". false로 저장된 탭만 사이드바에서 숨겨짐.
-// 모든 팀원에게 동일하게 적용되는 전체 공통 설정입니다.
-const seedTabSettings = () => ({});
-
 const seedCeoNotes = () => ([
   { id: uid(), date: "2026-08-14", text: "이번달 물류비 절감안 다음주까지 정리해서 보고" },
 ]);
@@ -2919,51 +2915,208 @@ function DBManager({ datasets }) {
   );
 }
 
-/* --------------------------------- 설정 (탭 표시/숨김) --------------------------------- */
-function SettingsTab({ tabSettings, setTabSettings, allNavItems }) {
-  const toggle = (key) => {
-    setTabSettings(prev => {
-      const cur = prev[key] !== false; // 기본값 true(보임)
-      return { ...prev, [key]: !cur };
-    });
+/* --------------------------------- 계정별 메뉴 표시 설정 --------------------------------- */
+// 계정(로그인 이메일)마다 DB에 한 줄씩 저장합니다.  key = "erp:access:<이메일>",  value = {"hidden":["accounting","okr", ...]}
+// hidden에 들어 있는 탭만 그 계정의 사이드바에서 숨겨집니다. (없으면 모두 보임)
+// ※ 메뉴 표시만 제어하는 기능이며, 데이터 접근 자체를 막는 보안 기능은 아닙니다.
+const ACCESS_PREFIX = "erp:access:";
+
+function parseAccessRow(value) {
+  try {
+    const o = JSON.parse(value);
+    return { hidden: Array.isArray(o.hidden) ? o.hidden : [] };
+  } catch {
+    return { hidden: [] };
+  }
+}
+
+function useAccessRules(email) {
+  const [rules, setRules] = useState({});            // { 이메일: { hidden: [...] } }
+  const [ready, setReady] = useState(!SUPABASE_READY || !email);
+
+  useEffect(() => {
+    if (!SUPABASE_READY || !email) { setReady(true); return; }
+    let cancelled = false;
+    let channel;
+
+    (async () => {
+      try {
+        const { data } = await supabase.from(TABLE).select("key,value").like("key", ACCESS_PREFIX + "%");
+        if (cancelled) return;
+        const next = {};
+        (data || []).forEach(r => { next[r.key.slice(ACCESS_PREFIX.length)] = parseAccessRow(r.value); });
+
+        // 이 계정이 처음 로그인한 경우 자동 등록.
+        //  · 시스템 전체에서 첫 계정이면 모든 메뉴 표시(=관리자 역할)
+        //  · 이미 다른 계정이 있으면 "설정" 탭은 숨긴 채로 시작(관리자가 나중에 체크해서 열어줄 수 있음)
+        if (!next[email]) {
+          const initial = { hidden: Object.keys(next).length === 0 ? [] : ["settings"] };
+          next[email] = initial;
+          await supabase.from(TABLE).upsert(
+            { key: ACCESS_PREFIX + email, value: JSON.stringify(initial), updated_at: new Date().toISOString() },
+            { onConflict: "key", ignoreDuplicates: true }
+          );
+        }
+        setRules(next);
+      } catch {
+        /* 네트워크 오류 등: 제한 없이 진행 */
+      } finally {
+        if (!cancelled) setReady(true);
+      }
+
+      if (cancelled) return;
+      channel = supabase
+        .channel("erp_access_rules")
+        .on("postgres_changes", { event: "*", schema: "public", table: TABLE }, (payload) => {
+          const row = payload.eventType === "DELETE" ? payload.old : payload.new;
+          if (!row || typeof row.key !== "string" || !row.key.startsWith(ACCESS_PREFIX)) return;
+          const em = row.key.slice(ACCESS_PREFIX.length);
+          if (payload.eventType === "DELETE") {
+            setRules(r => { const n = { ...r }; delete n[em]; return n; });
+          } else {
+            setRules(r => ({ ...r, [em]: parseAccessRow(row.value) }));
+          }
+        })
+        .subscribe();
+    })();
+
+    return () => {
+      cancelled = true;
+      if (channel) supabase.removeChannel(channel);
+    };
+  }, [email]);
+
+  const saveRule = (em, hidden) => {
+    setRules(r => ({ ...r, [em]: { hidden } }));
+    if (SUPABASE_READY) {
+      supabase.from(TABLE)
+        .upsert({ key: ACCESS_PREFIX + em, value: JSON.stringify({ hidden }), updated_at: new Date().toISOString() })
+        .then(() => {});
+    }
   };
+  const removeRule = (em) => {
+    setRules(r => { const n = { ...r }; delete n[em]; return n; });
+    if (SUPABASE_READY) supabase.from(TABLE).delete().eq("key", ACCESS_PREFIX + em).then(() => {});
+  };
+
+  return { rules, ready, saveRule, removeRule };
+}
+
+function SettingsTab({ rules, saveRule, removeRule, myEmail, allNavItems }) {
+  const [newEmail, setNewEmail] = useState("");
+  const [msg, setMsg] = useState("");
+
+  if (!SUPABASE_READY || !myEmail) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <SectionTitle icon={Settings} title="설정" sub="계정별 메뉴 표시 설정" />
+        <Card>
+          <div style={{ fontSize: 13, color: C.sub, lineHeight: 1.7 }}>
+            계정별 메뉴 설정은 로그인(팀 공유 데이터베이스 연결) 상태에서만 사용할 수 있습니다.
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  const emails = Object.keys(rules).sort((a, b) => (a === myEmail ? -1 : b === myEmail ? 1 : a.localeCompare(b)));
+
+  const toggle = (em, key) => {
+    const cur = (rules[em] && rules[em].hidden) || [];
+    saveRule(em, cur.includes(key) ? cur.filter(k => k !== key) : [...cur, key]);
+  };
+  const setAll = (em, show) => {
+    // 본인의 "설정" 탭은 항상 보이도록 유지(스스로 잠기는 것 방지)
+    saveRule(em, show ? [] : allNavItems.map(n => n.key).filter(k => !(em === myEmail && k === "settings")));
+  };
+  const addAccount = () => {
+    const em = newEmail.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) { setMsg("이메일 형식으로 입력해주세요."); return; }
+    if (rules[em]) { setMsg("이미 목록에 있는 계정입니다."); return; }
+    saveRule(em, ["settings"]); // 미리 등록한 계정은 '설정' 탭 숨김으로 시작
+    setNewEmail("");
+    setMsg(`${em} 계정을 목록에 추가했습니다. (설정 탭은 숨김 상태로 시작)`);
+  };
+
+  const COL = "minmax(200px, 1.4fr) " + allNavItems.map(() => "70px").join(" ") + " 150px 34px";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <SectionTitle icon={Settings} title="설정" sub="사이드바에 표시할 탭(메뉴)을 선택하세요. 여기서 끄면 모든 팀원 화면에서 함께 숨겨집니다." />
+      <SectionTitle icon={Settings} title="설정" sub="계정(로그인 아이디)별로 보여줄 메뉴를 체크하세요" />
+
       <Card>
-        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 2 }}>메뉴 표시 설정</div>
-        <div style={{ fontSize: 11, color: C.faint, marginBottom: 12 }}>
-          "설정" 탭도 숨길 수 있어요. 숨긴 뒤 다시 열고 싶으면, 사이드바 맨 위 로고(엘티에프포유 ERP)를 클릭하세요.
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>계정별 메뉴 표시</div>
+        <div style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.7, marginBottom: 12 }}>
+          · 체크된 메뉴만 해당 계정의 왼쪽 메뉴에 보입니다. 변경은 바로 저장되고 해당 계정 화면에도 실시간 반영됩니다.<br />
+          · 로그인한 적 있는 계정은 자동으로 목록에 나타납니다. 아직 로그인 전인 계정은 아래에서 이메일을 미리 등록하세요.<br />
+          · 새로 로그인한 계정은 <b>"설정" 메뉴가 숨김</b>으로 시작합니다. 관리자 역할을 줄 계정만 "설정"을 체크하세요.<br />
+          · 계정 만들기·삭제·비밀번호 변경은 Supabase 대시보드(Authentication → Users)에서 합니다.<br />
+          · 메뉴 표시만 제어하며, 데이터 접근 자체를 막는 보안 기능은 아닙니다.
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          {allNavItems.map(n => {
-            const Icon = n.icon;
-            const visible = tabSettings[n.key] !== false;
-            return (
-              <div key={n.key} style={{
-                display: "flex", alignItems: "center", justifyContent: "space-between",
-                padding: "10px 4px", borderBottom: "1px solid #F5F6F3",
-              }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <Icon size={16} color={C.sub} />
-                  <span style={{ fontSize: 13 }}>{n.label}</span>
+
+        <div style={{ overflowX: "auto" }}>
+          <div style={{ minWidth: 200 + allNavItems.length * 76 + 200 }}>
+            <div style={{ display: "grid", gridTemplateColumns: COL, gap: 6, padding: "0 0 8px", borderBottom: `1px solid ${C.border}`, alignItems: "end" }}>
+              <span style={{ fontSize: 10.5, fontWeight: 700, color: C.faint }}>계정(이메일)</span>
+              {allNavItems.map(n => (
+                <span key={n.key} style={{ fontSize: 10.5, fontWeight: 700, color: C.faint, textAlign: "center", lineHeight: 1.25 }}>{n.label}</span>
+              ))}
+              <span />
+              <span />
+            </div>
+
+            {emails.map(em => {
+              const hidden = (rules[em] && rules[em].hidden) || [];
+              const isMe = em === myEmail;
+              return (
+                <div key={em} style={{ display: "grid", gridTemplateColumns: COL, gap: 6, alignItems: "center", padding: "8px 0", borderBottom: "1px solid #F5F6F3" }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={em}>
+                    {em}{isMe && <span style={{ marginLeft: 6, fontSize: 10.5, color: C.primary }}>(나)</span>}
+                  </div>
+                  {allNavItems.map(n => {
+                    const locked = isMe && n.key === "settings"; // 내 설정 탭은 끌 수 없음
+                    return (
+                      <div key={n.key} style={{ textAlign: "center" }}>
+                        <input
+                          type="checkbox"
+                          checked={!hidden.includes(n.key)}
+                          disabled={locked}
+                          onChange={() => toggle(em, n.key)}
+                          title={locked ? "본인의 설정 메뉴는 숨길 수 없습니다" : ""}
+                          style={{ width: 16, height: 16, cursor: locked ? "not-allowed" : "pointer", accentColor: C.primary }}
+                        />
+                      </div>
+                    );
+                  })}
+                  <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                    <button style={{ ...btnGhost, padding: "3px 8px", fontSize: 11 }} onClick={() => setAll(em, true)}>모두 표시</button>
+                    <button style={{ ...btnGhost, padding: "3px 8px", fontSize: 11 }} onClick={() => setAll(em, false)}>모두 숨김</button>
+                  </div>
+                  {isMe ? <span /> : (
+                    <IconBtn danger title="이 계정 설정 삭제 (다음 로그인 때 다시 등록됨)" onClick={() => {
+                      if (window.confirm(`${em} 계정의 메뉴 설정을 삭제할까요?\n(계정 자체는 삭제되지 않고, 다음 로그인 때 기본값으로 다시 등록됩니다)`)) removeRule(em);
+                    }}><Trash2 size={13} /></IconBtn>
+                  )}
                 </div>
-                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-                  <span style={{ fontSize: 11.5, color: visible ? C.primary : C.faint, fontWeight: 700 }}>
-                    {visible ? "표시됨" : "숨김"}
-                  </span>
-                  <input
-                    type="checkbox"
-                    checked={visible}
-                    onChange={() => toggle(n.key)}
-                    style={{ width: 16, height: 16, cursor: "pointer", accentColor: C.primary }}
-                  />
-                </label>
-              </div>
-            );
-          })}
+              );
+            })}
+            {emails.length === 0 && <div style={{ fontSize: 12, color: C.faint, padding: "14px 0" }}>등록된 계정이 없습니다.</div>}
+          </div>
         </div>
+      </Card>
+
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>로그인 전 계정 미리 등록</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <input
+            placeholder="name@company.com" value={newEmail}
+            onChange={e => { setNewEmail(e.target.value); setMsg(""); }}
+            onKeyDown={e => { if (e.key === "Enter") addAccount(); }}
+            style={{ ...inputStyle, minWidth: 240 }}
+          />
+          <button style={btnPrimary} onClick={addAccount}><Plus size={14} />등록</button>
+        </div>
+        {msg && <div style={{ fontSize: 12, color: C.sub, marginTop: 8 }}>{msg}</div>}
       </Card>
     </div>
   );
@@ -3047,9 +3200,12 @@ function AppShell({ userEmail, onSignOut }) {
   const [ceoNotes, setCeoNotes, r15] = useSyncedState("erp:ceoNotes", seedCeoNotes);
   const [myNotes, setMyNotes, r16] = useSyncedState("erp:myNotes", seedMyNotes);
   const [partners, setPartners, r17] = useSyncedState("erp:partners", seedPartners);
-  const [tabSettings, setTabSettings, r18] = useSyncedState("erp:tabSettings", seedTabSettings);
 
-  const loading = !(r1 && r2 && r3 && r4 && r5 && r6 && r7 && r8 && r9 && r10 && r11 && r12 && r13 && r14 && r15 && r16 && r17 && r18);
+  // 계정(로그인 이메일)별 메뉴 표시 규칙
+  const myEmail = userEmail ? userEmail.toLowerCase() : null;
+  const access = useAccessRules(myEmail);
+
+  const loading = !(r1 && r2 && r3 && r4 && r5 && r6 && r7 && r8 && r9 && r10 && r11 && r12 && r13 && r14 && r15 && r16 && r17 && access.ready);
 
   const navItems = [
     { key: "dashboard", label: "대시보드", icon: LayoutDashboard },
@@ -3063,7 +3219,17 @@ function AppShell({ userEmail, onSignOut }) {
     { key: "db", label: "DB관리", icon: Database },
     { key: "settings", label: "설정", icon: Settings },
   ];
-  const visibleNavItems = navItems.filter(n => tabSettings[n.key] !== false);
+  const myHidden = (myEmail && access.rules[myEmail] && access.rules[myEmail].hidden) || [];
+  const canSee = (key) => !myHidden.includes(key);
+  const visibleNavItems = navItems.filter(n => canSee(n.key));
+  const activeTab = canSee(tab) ? tab : null;
+
+  // 관리자가 내 메뉴를 숨기면(현재 보던 탭 포함) 보이는 첫 메뉴로 이동
+  useEffect(() => {
+    if (!access.ready || canSee(tab)) return;
+    const first = navItems.find(n => canSee(n.key));
+    if (first) setTab(first.key);
+  });
 
   // DB관리 탭(엑셀 전체 업로드/다운로드)이 다루는 데이터 묶음 — 시트명 = label
   const dbSets = [
@@ -3098,11 +3264,7 @@ function AppShell({ userEmail, onSignOut }) {
     <div style={{ display: "flex", fontFamily: FONT, background: C.bg, minHeight: 640, borderRadius: 16, overflow: "hidden", border: `1px solid ${C.border}` }}>
       {/* 사이드바 */}
       <div style={{ width: 200, background: C.primaryDark, padding: "22px 14px", display: "flex", flexDirection: "column", gap: 4 }}>
-        <div
-          onClick={() => setTab("settings")}
-          title="설정 탭이 안 보이면 여기를 클릭하세요"
-          style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 8px 14px", cursor: "pointer" }}
-        >
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 8px 14px" }}>
           <Package size={20} color="#fff" />
           <div>
             <div style={{ color: "#fff", fontWeight: 800, fontSize: 14 }}>엘티에프포유 ERP</div>
@@ -3151,16 +3313,21 @@ function AppShell({ userEmail, onSignOut }) {
 
       {/* 본문 */}
       <div style={{ flex: 1, padding: 24, overflowY: "auto" }}>
-        {tab === "dashboard" && <Dashboard withdrawals={withdrawals} cards={cards} deposits={deposits} budget={budget} setBudget={setBudget} ceoNotes={ceoNotes} setCeoNotes={setCeoNotes} myNotes={myNotes} setMyNotes={setMyNotes} />}
-        {tab === "logistics" && <Logistics inventory={inventory} setInventory={setInventory} movements={movements} setMovements={setMovements} />}
-        {tab === "accounting" && <Accounting sales={sales} setSales={setSales} purchases={purchases} setPurchases={setPurchases} deposits={deposits} setDeposits={setDeposits} withdrawals={withdrawals} setWithdrawals={setWithdrawals} cards={cards} setCards={setCards} bankTxns={bankTxns} setBankTxns={setBankTxns} bankOpening={bankOpening} setBankOpening={setBankOpening} />}
-        {tab === "partners" && <PartnerMaster partners={partners} setPartners={setPartners} />}
-        {tab === "todo" && <TodoTab todos={todos} setTodos={setTodos} />}
-        {tab === "checklist" && <ChecklistTab checklist={checklist} setChecklist={setChecklist} />}
-        {tab === "okr" && <OkrTab okrs={okrs} setOkrs={setOkrs} />}
-        {tab === "report" && <ReportTab reports={reports} setReports={setReports} todos={todos} sales={sales} deposits={deposits} inventory={inventory} />}
-        {tab === "db" && <DBManager datasets={dbSets} />}
-        {tab === "settings" && <SettingsTab tabSettings={tabSettings} setTabSettings={setTabSettings} allNavItems={navItems} />}
+        {activeTab === "dashboard" && <Dashboard withdrawals={withdrawals} cards={cards} deposits={deposits} budget={budget} setBudget={setBudget} ceoNotes={ceoNotes} setCeoNotes={setCeoNotes} myNotes={myNotes} setMyNotes={setMyNotes} />}
+        {activeTab === "logistics" && <Logistics inventory={inventory} setInventory={setInventory} movements={movements} setMovements={setMovements} />}
+        {activeTab === "accounting" && <Accounting sales={sales} setSales={setSales} purchases={purchases} setPurchases={setPurchases} deposits={deposits} setDeposits={setDeposits} withdrawals={withdrawals} setWithdrawals={setWithdrawals} cards={cards} setCards={setCards} bankTxns={bankTxns} setBankTxns={setBankTxns} bankOpening={bankOpening} setBankOpening={setBankOpening} />}
+        {activeTab === "partners" && <PartnerMaster partners={partners} setPartners={setPartners} />}
+        {activeTab === "todo" && <TodoTab todos={todos} setTodos={setTodos} />}
+        {activeTab === "checklist" && <ChecklistTab checklist={checklist} setChecklist={setChecklist} />}
+        {activeTab === "okr" && <OkrTab okrs={okrs} setOkrs={setOkrs} />}
+        {activeTab === "report" && <ReportTab reports={reports} setReports={setReports} todos={todos} sales={sales} deposits={deposits} inventory={inventory} />}
+        {activeTab === "db" && <DBManager datasets={dbSets} />}
+        {activeTab === "settings" && <SettingsTab rules={access.rules} saveRule={access.saveRule} removeRule={access.removeRule} myEmail={myEmail} allNavItems={navItems} />}
+        {!activeTab && (
+          <div style={{ fontSize: 13, color: C.faint, padding: "40px 0", textAlign: "center" }}>
+            표시할 수 있는 메뉴가 없습니다. 관리자에게 문의해주세요.
+          </div>
+        )}
       </div>
     </div>
   );
