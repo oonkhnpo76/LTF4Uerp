@@ -8,7 +8,7 @@ import {
   Trash2, Package, TrendingUp, TrendingDown, Minus,
   Upload, Download, Save, X, ChevronLeft, ChevronRight as ChevronRightIcon, Boxes,
   FileText, Copy, Check, StickyNote, Wallet, Megaphone, Pencil,
-  CreditCard, Landmark, Users, CalendarDays, LayoutGrid, Wifi, WifiOff, LogOut, Lock, Settings
+  CreditCard, Landmark, Users, CalendarDays, LayoutGrid, Wifi, WifiOff, LogOut, Lock, Settings, Database
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -2080,12 +2080,49 @@ function TodoTab({ todos, setTodos }) {
   );
 }
 
-/* ------------------------- 업무 체크리스트 탭 (마인드맵: 기간 → 부서 → 업무) ------------------------- */
+/* ------------------------- 업무 체크리스트 탭 (표 형식: 바로 수정 · 정렬 · 필터) ------------------------- */
+// 텍스트 칸은 입력 중에는 이 칸 안에서만 바뀌고, 칸을 벗어나거나 Enter를 누를 때 저장됩니다.
+// (글자 하나 칠 때마다 팀 전체 DB에 저장되는 것을 막기 위함)
+function CellInput({ value, onCommit, style, placeholder }) {
+  const [v, setV] = useState(value ?? "");
+  useEffect(() => { setV(value ?? ""); }, [value]);
+  const commit = () => { if (v !== (value ?? "")) onCommit(v); };
+  return (
+    <input
+      value={v}
+      placeholder={placeholder}
+      onChange={e => setV(e.target.value)}
+      onBlur={commit}
+      onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); if (e.key === "Escape") { setV(value ?? ""); e.currentTarget.blur(); } }}
+      style={{ ...inputStyle, padding: "4px 6px", fontSize: 12, width: "100%", boxSizing: "border-box", ...style }}
+    />
+  );
+}
+
+const CHECK_COLS = [
+  { key: "done", label: "완료", w: "46px" },
+  { key: "date", label: "날짜", w: "122px" },
+  { key: "dow", label: "요일", w: "42px" },
+  { key: "period", label: "기간", w: "68px" },
+  { key: "dept", label: "구분", w: "74px" },
+  { key: "timeSlot", label: "시간대", w: "104px" },
+  { key: "category", label: "업무구분", w: "110px" },
+  { key: "task", label: "세부업무", w: "minmax(220px, 1fr)" },
+  { key: "assignee", label: "담당자", w: "92px" },
+  { key: "priority", label: "우선순위", w: "74px" },
+  { key: "memo", label: "확인사항/메모", w: "minmax(150px, 0.6fr)" },
+];
+const CHECK_GRID = CHECK_COLS.map(c => c.w).join(" ") + " 34px";
+const PRIORITY_RANK = { 상: 0, 중: 1, 하: 2 };
+
 function ChecklistTab({ checklist, setChecklist }) {
-  const emptyForm = { date: "2026-08-10", period: "일일", dept: "회계", timeSlot: "", category: "", task: "", memo: "", priority: "중", assignee: "" };
+  const emptyForm = { date: today(), period: "일일", dept: "회계", timeSlot: "", category: "", task: "", memo: "", priority: "중", assignee: "" };
   const [form, setForm] = useState(emptyForm);
-  const [selectedId, setSelectedId] = useState(null);
-  const [draft, setDraft] = useState(null);
+  const [fPeriod, setFPeriod] = useState("전체");
+  const [fDept, setFDept] = useState("전체");
+  const [fDone, setFDone] = useState("전체");
+  const [q, setQ] = useState("");
+  const [sort, setSort] = useState({ key: null, dir: "asc" });
   const fileInputRef = useRef(null);
 
   const add = () => {
@@ -2093,16 +2130,54 @@ function ChecklistTab({ checklist, setChecklist }) {
     setChecklist(c => [{ id: uid(), done: false, ...form }, ...c]);
     setForm(f => ({ ...emptyForm, date: f.date, period: f.period, dept: f.dept }));
   };
-  const remove = (id) => { setChecklist(c => c.filter(x => x.id !== id)); setSelectedId(null); setDraft(null); };
-  const save = () => { setChecklist(c => c.map(x => x.id === selectedId ? { ...draft } : x)); };
-  const selectLeaf = (node) => { setSelectedId(node.id); setDraft({ ...node.data }); };
+  const update = (id, patch) => setChecklist(c => c.map(x => x.id === id ? { ...x, ...patch } : x));
+  const remove = (id) => {
+    if (!window.confirm("이 업무를 삭제할까요?")) return;
+    setChecklist(c => c.filter(x => x.id !== id));
+  };
+
+  const toggleSort = (key) => {
+    setSort(s => {
+      if (s.key !== key) return { key, dir: "asc" };
+      if (s.dir === "asc") return { key, dir: "desc" };
+      return { key: null, dir: "asc" }; // 세 번째 클릭: 정렬 해제(저장된 순서)
+    });
+  };
+
+  const sortValue = (r, key) => {
+    if (key === "dow") return dayKR(r.date);
+    if (key === "priority") return PRIORITY_RANK[r.priority] ?? 9;
+    if (key === "period") return PERIODS.indexOf(r.period);
+    if (key === "dept") return DEPTS.indexOf(r.dept);
+    if (key === "done") return r.done ? 1 : 0;
+    return r[key] ?? "";
+  };
+
+  const kw = q.trim().toLowerCase();
+  let rows = checklist.filter(r =>
+    (fPeriod === "전체" || r.period === fPeriod) &&
+    (fDept === "전체" || r.dept === fDept) &&
+    (fDone === "전체" || (fDone === "완료" ? r.done : !r.done)) &&
+    (!kw || [r.task, r.category, r.assignee, r.memo, r.timeSlot].some(s => String(s || "").toLowerCase().includes(kw)))
+  );
+  if (sort.key) {
+    const sign = sort.dir === "asc" ? 1 : -1;
+    rows = [...rows].sort((a, b) => {
+      const va = sortValue(a, sort.key), vb = sortValue(b, sort.key);
+      if (typeof va === "number" && typeof vb === "number") return (va - vb) * sign;
+      return String(va).localeCompare(String(vb), "ko") * sign;
+    });
+  }
+
+  const doneCount = checklist.filter(c => c.done).length;
+  const pct = checklist.length ? Math.round((doneCount / checklist.length) * 100) : 0;
 
   const downloadCSVFile = () => {
-    const rows = checklist.map(c => ({
+    const out = checklist.map(c => ({
       완료: c.done ? "TRUE" : "FALSE", 날짜: c.date, 요일: dayKR(c.date), 기간: c.period, 부서: c.dept,
       시간대: c.timeSlot, 업무구분: c.category, 세부업무: c.task, "확인사항/메모": c.memo, 우선순위: c.priority, 담당자: c.assignee,
     }));
-    const csv = Papa.unparse(rows);
+    const csv = Papa.unparse(out);
     const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -2135,20 +2210,11 @@ function ChecklistTab({ checklist, setChecklist }) {
     e.target.value = "";
   };
 
-  const tree = {
-    id: "root", label: "체크리스트", children: PERIODS.map(period => ({
-      id: "p-" + period, label: period + "업무", color: PERIOD_COLORS[period],
-      children: DEPTS.map(dept => ({
-        id: "p-" + period + "-d-" + dept, label: dept, color: DEPT_COLORS[dept],
-        children: checklist.filter(c => c.period === period && c.dept === dept)
-          .map(c => ({ id: c.id, label: c.task || "(제목없음)", data: c })),
-      })),
-    })),
-  };
+  const cellSelect = { ...inputStyle, padding: "4px 4px", fontSize: 12, width: "100%", boxSizing: "border-box" };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <SectionTitle icon={ClipboardCheck} title="업무 체크리스트" sub="기간(일일·주간·월간) → 구분(인사·회계·물류·세금·기타) 마인드맵" />
+      <SectionTitle icon={ClipboardCheck} title="업무 체크리스트" sub="표에서 바로 수정 · 제목을 누르면 정렬 (인사·회계·물류·세금·기타)" />
 
       <Card>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -2169,7 +2235,7 @@ function ChecklistTab({ checklist, setChecklist }) {
           <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} style={inputStyle} />
           <input placeholder="시간대(선택)" value={form.timeSlot} onChange={e => setForm(f => ({ ...f, timeSlot: e.target.value }))} style={{ ...inputStyle, width: 110 }} />
           <input placeholder="업무구분" value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))} style={{ ...inputStyle, width: 110 }} />
-          <input placeholder="세부업무" value={form.task} onChange={e => setForm(f => ({ ...f, task: e.target.value }))} style={{ ...inputStyle, flex: 1, minWidth: 160 }} />
+          <input placeholder="세부업무" value={form.task} onChange={e => setForm(f => ({ ...f, task: e.target.value }))} onKeyDown={e => { if (e.key === "Enter") add(); }} style={{ ...inputStyle, flex: 1, minWidth: 160 }} />
           <input placeholder="담당자" value={form.assignee} onChange={e => setForm(f => ({ ...f, assignee: e.target.value }))} style={{ ...inputStyle, width: 100 }} />
           <select value={form.priority} onChange={e => setForm(f => ({ ...f, priority: e.target.value }))} style={inputStyle}>
             <option>상</option><option>중</option><option>하</option>
@@ -2179,55 +2245,82 @@ function ChecklistTab({ checklist, setChecklist }) {
       </Card>
 
       <Card>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 8 }}>
-          {PERIODS.map(p => (
-            <span key={p} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: C.sub }}>
-              <span style={{ width: 9, height: 9, borderRadius: "50%", background: PERIOD_COLORS[p], display: "inline-block" }} />{p}업무
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>
+            업무 목록
+            <span style={{ fontWeight: 500, color: C.faint, fontSize: 12, marginLeft: 8 }}>
+              전체 {checklist.length}건 · 완료 {doneCount}건 ({pct}%) · 표시 {rows.length}건
             </span>
-          ))}
-          {DEPTS.map(d => (
-            <span key={d} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: C.sub }}>
-              <span style={{ width: 9, height: 9, borderRadius: "50%", background: DEPT_COLORS[d], display: "inline-block" }} />{d}
-            </span>
-          ))}
-          <span style={{ fontSize: 11, color: C.faint, marginLeft: "auto" }}>노드 클릭 시 상세/수정 · 보드는 드래그로 이동</span>
-        </div>
-        <MindMap tree={tree} width={1100} height={900} radiusStep={140} onLeafClick={selectLeaf} selectedId={selectedId} />
-      </Card>
-
-      {draft && (
-        <DetailPanel
-          title="업무 상세/수정"
-          onCancel={() => { setSelectedId(null); setDraft(null); }}
-          onSave={save}
-          onDelete={() => remove(selectedId)}
-        >
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-            <select value={draft.period} onChange={e => setDraft(d => ({ ...d, period: e.target.value }))} style={inputStyle}>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <select value={fPeriod} onChange={e => setFPeriod(e.target.value)} style={inputStyle}>
+              <option value="전체">기간 전체</option>
               {PERIODS.map(p => <option key={p} value={p}>{p}</option>)}
             </select>
-            <select value={draft.dept} onChange={e => setDraft(d => ({ ...d, dept: e.target.value }))} style={inputStyle}>
+            <select value={fDept} onChange={e => setFDept(e.target.value)} style={inputStyle}>
+              <option value="전체">구분 전체</option>
               {DEPTS.map(d => <option key={d} value={d}>{d}</option>)}
             </select>
-            <input type="date" value={draft.date} onChange={e => setDraft(d => ({ ...d, date: e.target.value }))} style={inputStyle} />
-            <input value={draft.timeSlot} onChange={e => setDraft(d => ({ ...d, timeSlot: e.target.value }))} style={{ ...inputStyle, width: 100 }} placeholder="시간대" />
-            <select value={draft.priority} onChange={e => setDraft(d => ({ ...d, priority: e.target.value }))} style={inputStyle}>
-              <option>상</option><option>중</option><option>하</option>
+            <select value={fDone} onChange={e => setFDone(e.target.value)} style={inputStyle}>
+              <option value="전체">완료여부 전체</option>
+              <option value="미완료">미완료</option>
+              <option value="완료">완료</option>
             </select>
-            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: C.sub }}>
-              <input type="checkbox" checked={draft.done} onChange={e => setDraft(d => ({ ...d, done: e.target.checked }))} style={{ accentColor: C.primary }} />
-              완료
-            </label>
+            <input placeholder="업무·담당자·메모 검색" value={q} onChange={e => setQ(e.target.value)} style={{ ...inputStyle, minWidth: 170 }} />
           </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-            <input value={draft.category} onChange={e => setDraft(d => ({ ...d, category: e.target.value }))} style={{ ...inputStyle, width: 130 }} placeholder="업무구분" />
-            <input value={draft.task} onChange={e => setDraft(d => ({ ...d, task: e.target.value }))} style={{ ...inputStyle, flex: 1, minWidth: 200 }} placeholder="세부업무" />
-            <input value={draft.assignee} onChange={e => setDraft(d => ({ ...d, assignee: e.target.value }))} style={{ ...inputStyle, width: 100 }} placeholder="담당자" />
+        </div>
+
+        <div style={{ overflowX: "auto" }}>
+          <div style={{ minWidth: 1150 }}>
+            <div style={{ display: "grid", gridTemplateColumns: CHECK_GRID, gap: 6, padding: "0 0 6px", borderBottom: `1px solid ${C.border}` }}>
+              {CHECK_COLS.map(c => {
+                const active = sort.key === c.key;
+                return (
+                  <button key={c.key} onClick={() => toggleSort(c.key)} title="누르면 정렬 (오름차순 → 내림차순 → 해제)" style={{
+                    border: "none", background: "transparent", cursor: "pointer", textAlign: "left", padding: 0,
+                    fontSize: 10.5, fontWeight: 700, color: active ? C.primary : C.faint, fontFamily: FONT,
+                  }}>
+                    {c.label}{active ? (sort.dir === "asc" ? " ▲" : " ▼") : ""}
+                  </button>
+                );
+              })}
+              <span />
+            </div>
+
+            {rows.map(r => (
+              <div key={r.id} style={{
+                display: "grid", gridTemplateColumns: CHECK_GRID, gap: 6, alignItems: "center",
+                padding: "5px 0", borderBottom: "1px solid #F5F6F3", opacity: r.done ? 0.62 : 1,
+              }}>
+                <input type="checkbox" checked={!!r.done} onChange={e => update(r.id, { done: e.target.checked })}
+                  style={{ width: 16, height: 16, cursor: "pointer", accentColor: C.primary, justifySelf: "center" }} />
+                <input type="date" value={r.date || ""} onChange={e => update(r.id, { date: e.target.value })} style={cellSelect} />
+                <span style={{ fontSize: 11.5, color: C.sub, textAlign: "center" }}>{r.date ? dayKRshort(r.date) : ""}</span>
+                <select value={r.period} onChange={e => update(r.id, { period: e.target.value })} style={cellSelect}>
+                  {PERIODS.map(p => <option key={p} value={p}>{p}</option>)}
+                </select>
+                <select value={r.dept} onChange={e => update(r.id, { dept: e.target.value })}
+                  style={{ ...cellSelect, color: DEPT_COLORS[r.dept] || C.ink, fontWeight: 700 }}>
+                  {DEPTS.includes(r.dept) ? null : <option value={r.dept}>{r.dept}</option>}
+                  {DEPTS.map(d => <option key={d} value={d}>{d}</option>)}
+                </select>
+                <CellInput value={r.timeSlot} placeholder="09:00~09:30" onCommit={v => update(r.id, { timeSlot: v })} />
+                <CellInput value={r.category} onCommit={v => update(r.id, { category: v })} />
+                <CellInput value={r.task} onCommit={v => update(r.id, { task: v })}
+                  style={{ textDecoration: r.done ? "line-through" : "none", fontWeight: 600 }} />
+                <CellInput value={r.assignee} onCommit={v => update(r.id, { assignee: v })} />
+                <select value={r.priority} onChange={e => update(r.id, { priority: e.target.value })}
+                  style={{ ...cellSelect, color: r.priority === "상" ? C.red : r.priority === "하" ? C.faint : C.ink, fontWeight: 700 }}>
+                  <option>상</option><option>중</option><option>하</option>
+                </select>
+                <CellInput value={r.memo} onCommit={v => update(r.id, { memo: v })} />
+                <IconBtn danger title="삭제" onClick={() => remove(r.id)}><Trash2 size={13} /></IconBtn>
+              </div>
+            ))}
+            {rows.length === 0 && <div style={{ fontSize: 12, color: C.faint, padding: "16px 0" }}>조건에 맞는 업무가 없습니다.</div>}
           </div>
-          <textarea value={draft.memo} onChange={e => setDraft(d => ({ ...d, memo: e.target.value }))}
-            placeholder="확인사항/메모" style={{ ...inputStyle, width: "100%", minHeight: 60, resize: "vertical", fontFamily: FONT }} />
-        </DetailPanel>
-      )}
+        </div>
+      </Card>
     </div>
   );
 }
@@ -2674,6 +2767,158 @@ function PartnerMaster({ partners, setPartners }) {
   );
 }
 
+/* --------------------------------- DB관리 (엑셀 전체 업로드/다운로드) --------------------------------- */
+// 엑셀 파일 1개 = 전체 DB. 시트 1개 = 데이터 묶음 1개(재고, 매출, 거래처마스터 …).
+// 배열/객체 안에 또 배열이 들어있는 칸(예: OKR의 KR 목록)은 "__json__:" 접두어를 붙여 한 칸에 저장했다가 업로드 때 복원합니다.
+const JSON_MARK = "__json__:";
+const SCALAR_COL = "값(JSON)";
+
+function DBManager({ datasets }) {
+  const fileRef = useRef(null);
+  const [msg, setMsg] = useState(null); // { tone: "ok" | "warn" | "err", text }
+
+  const countOf = (v) => Array.isArray(v) ? `${v.length}건` : "단일 값";
+
+  const download = () => {
+    const wb = XLSX.utils.book_new();
+    datasets.forEach(ds => {
+      let ws;
+      if (Array.isArray(ds.value)) {
+        const rows = ds.value.map(row => {
+          const out = {};
+          Object.keys(row).forEach(k => {
+            const v = row[k];
+            out[k] = v === null || v === undefined ? "" : (typeof v === "object" ? JSON_MARK + JSON.stringify(v) : v);
+          });
+          return out;
+        });
+        ws = XLSX.utils.json_to_sheet(rows);
+      } else {
+        ws = XLSX.utils.json_to_sheet([{ [SCALAR_COL]: JSON.stringify(ds.value) }]);
+      }
+      XLSX.utils.book_append_sheet(wb, ws, ds.label);
+    });
+    const info = datasets.map(ds => ({ 시트명: ds.label, 건수: Array.isArray(ds.value) ? ds.value.length : "단일 값" }));
+    info.push({ 시트명: "내보낸 날짜", 건수: today() });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(info), "_info");
+    XLSX.writeFile(wb, `엘티에프포유_DB_${today()}.xlsx`);
+    setMsg({ tone: "ok", text: `전체 DB ${datasets.length}개 시트를 엑셀로 내려받았습니다.` });
+  };
+
+  const parseSheet = (ws, current) => {
+    const rows = XLSX.utils.sheet_to_json(ws, { defval: "", raw: true });
+    // 단일 값(예산, 기초잔액 등)
+    if (!Array.isArray(current)) {
+      if (!rows.length || !(SCALAR_COL in rows[0])) throw new Error("단일 값 시트 형식이 아닙니다");
+      const parsed = JSON.parse(rows[0][SCALAR_COL]);
+      if (typeof parsed !== typeof current) throw new Error("값의 형식이 기존과 다릅니다");
+      return parsed;
+    }
+    // 목록(배열)
+    if (rows.length && (SCALAR_COL in rows[0]) && Object.keys(rows[0]).length === 1) throw new Error("목록 시트 형식이 아닙니다");
+    const hasId = rows.length ? ("id" in rows[0]) : false;
+    return rows
+      .filter(r => Object.values(r).some(v => v !== "" && v !== null && v !== undefined))
+      .map(r => {
+        const o = {};
+        Object.keys(r).forEach(k => {
+          let v = r[k];
+          if (typeof v === "string" && v.startsWith(JSON_MARK)) {
+            try { v = JSON.parse(v.slice(JSON_MARK.length)); } catch { /* 문자열 그대로 둠 */ }
+          }
+          o[k] = v;
+        });
+        if (hasId && !o.id) o.id = uid();
+        return o;
+      });
+  };
+
+  const handleFile = (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const wb = XLSX.read(ev.target.result, { type: "array" });
+        const found = datasets.filter(ds => wb.SheetNames.some(n => n.trim() === ds.label));
+        if (!found.length) {
+          setMsg({ tone: "err", text: "엑셀에서 인식할 수 있는 시트가 없습니다. '전체 DB 다운로드'로 받은 파일 형식(시트명 유지)을 사용해주세요." });
+          return;
+        }
+        const results = [];
+        const skipped = [];
+        found.forEach(ds => {
+          const sheetName = wb.SheetNames.find(n => n.trim() === ds.label);
+          try {
+            results.push({ ds, value: parseSheet(wb.Sheets[sheetName], ds.value) });
+          } catch (err) {
+            skipped.push(`${ds.label}(${err.message})`);
+          }
+        });
+        if (!results.length) {
+          setMsg({ tone: "err", text: `반영할 수 있는 시트가 없습니다. 건너뜀: ${skipped.join(", ")}` });
+          return;
+        }
+        const names = results.map(r => `${r.ds.label} ${Array.isArray(r.value) ? r.value.length + "건" : ""}`.trim()).join("\n· ");
+        const ok = window.confirm(
+          `엑셀 내용으로 아래 ${results.length}개 데이터를 덮어씁니다.\n(엑셀에 없는 시트는 그대로 유지됩니다)\n\n· ${names}\n\n되돌릴 수 없으니, 먼저 '전체 DB 다운로드'로 백업해두셨는지 확인하세요.\n계속할까요?`
+        );
+        if (!ok) { setMsg({ tone: "warn", text: "업로드를 취소했습니다. 데이터는 바뀌지 않았습니다." }); return; }
+        results.forEach(r => r.ds.set(r.value));
+        setMsg({
+          tone: skipped.length ? "warn" : "ok",
+          text: `${results.length}개 시트를 반영했습니다.` + (skipped.length ? ` 건너뜀: ${skipped.join(", ")}` : ""),
+        });
+      } catch (err) {
+        setMsg({ tone: "err", text: "엑셀 파일을 읽지 못했습니다: " + err.message });
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const toneColor = msg ? (msg.tone === "ok" ? C.primary : msg.tone === "warn" ? C.amber : C.red) : C.sub;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <SectionTitle icon={Database} title="DB관리" sub="전체 데이터를 엑셀 한 파일로 내려받고, 수정한 엑셀을 다시 올려 반영합니다" />
+
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>엑셀 전체 DB</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }} onChange={handleFile} />
+          <button style={btnPrimary} onClick={download}><Download size={14} />전체 DB 엑셀 다운로드</button>
+          <button style={btnGhost} onClick={() => fileRef.current && fileRef.current.click()}><Upload size={13} />전체 DB 엑셀 업로드</button>
+        </div>
+        {msg && (
+          <div style={{ fontSize: 12.5, color: toneColor, fontWeight: 700, marginBottom: 10, lineHeight: 1.5 }}>{msg.text}</div>
+        )}
+        <div style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.7 }}>
+          · 다운로드한 엑셀의 <b>시트 이름과 첫 줄(열 제목)은 바꾸지 마세요.</b> 행을 추가·수정·삭제하는 것은 자유입니다.<br />
+          · 업로드하면 엑셀에 들어 있는 시트만 현재 데이터를 <b>덮어씁니다</b> (일부 시트만 올려도 됩니다).<br />
+          · 변경 내용은 로그인한 모든 팀원 화면에 바로 반영됩니다. 업로드 전에 반드시 다운로드로 백업하세요.<br />
+          · 탭 표시 설정은 전체 DB에 포함되지 않습니다.
+        </div>
+      </Card>
+
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>현재 저장된 데이터 ({datasets.length}개 시트)</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 8 }}>
+          {datasets.map(ds => (
+            <div key={ds.label} style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              padding: "8px 10px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12.5,
+            }}>
+              <span style={{ fontWeight: 700 }}>{ds.label}</span>
+              <span style={{ color: C.faint, fontSize: 11.5 }}>{countOf(ds.value)}</span>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 /* --------------------------------- 설정 (탭 표시/숨김) --------------------------------- */
 function SettingsTab({ tabSettings, setTabSettings, allNavItems }) {
   const toggle = (key) => {
@@ -2815,9 +3060,31 @@ function AppShell({ userEmail, onSignOut }) {
     { key: "checklist", label: "업무체크리스트", icon: ClipboardCheck },
     { key: "okr", label: "분기목표(OKR)", icon: Target },
     { key: "report", label: "대표님 보고", icon: FileText },
+    { key: "db", label: "DB관리", icon: Database },
     { key: "settings", label: "설정", icon: Settings },
   ];
   const visibleNavItems = navItems.filter(n => tabSettings[n.key] !== false);
+
+  // DB관리 탭(엑셀 전체 업로드/다운로드)이 다루는 데이터 묶음 — 시트명 = label
+  const dbSets = [
+    { label: "재고", value: inventory, set: setInventory },
+    { label: "입출고내역", value: movements, set: setMovements },
+    { label: "매출", value: sales, set: setSales },
+    { label: "매입", value: purchases, set: setPurchases },
+    { label: "입금", value: deposits, set: setDeposits },
+    { label: "출금", value: withdrawals, set: setWithdrawals },
+    { label: "법인카드", value: cards, set: setCards },
+    { label: "통장거래", value: bankTxns, set: setBankTxns },
+    { label: "통장기초잔액", value: bankOpening, set: setBankOpening },
+    { label: "TODO", value: todos, set: setTodos },
+    { label: "업무체크리스트", value: checklist, set: setChecklist },
+    { label: "OKR", value: okrs, set: setOkrs },
+    { label: "대표님보고", value: reports, set: setReports },
+    { label: "지출예산", value: budget, set: setBudget },
+    { label: "대표님지시사항", value: ceoNotes, set: setCeoNotes },
+    { label: "나의메모", value: myNotes, set: setMyNotes },
+    { label: "거래처마스터", value: partners, set: setPartners },
+  ];
 
   if (loading) {
     return (
@@ -2892,6 +3159,7 @@ function AppShell({ userEmail, onSignOut }) {
         {tab === "checklist" && <ChecklistTab checklist={checklist} setChecklist={setChecklist} />}
         {tab === "okr" && <OkrTab okrs={okrs} setOkrs={setOkrs} />}
         {tab === "report" && <ReportTab reports={reports} setReports={setReports} todos={todos} sales={sales} deposits={deposits} inventory={inventory} />}
+        {tab === "db" && <DBManager datasets={dbSets} />}
         {tab === "settings" && <SettingsTab tabSettings={tabSettings} setTabSettings={setTabSettings} allNavItems={navItems} />}
       </div>
     </div>
