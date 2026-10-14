@@ -150,6 +150,17 @@ const dayKR = (dateStr) => {
   return ["일요일", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일"][dt.getDay()];
 };
 const dayKRshort = (dateStr) => dayKR(dateStr).slice(0, 1);
+// "2026.07.03" · "2026/7/3" · 엑셀 날짜 일련번호 → "2026-07-03" 으로 통일 (달력·월별 집계가 이 형식을 기준으로 동작)
+const normDate = (v) => {
+  if (v === null || v === undefined || v === "") return "";
+  if (typeof v === "number") {
+    if (v > 20000 && v < 80000) return new Date(Math.round((v - 25569) * 86400 * 1000)).toISOString().slice(0, 10);
+    return String(v);
+  }
+  const str = String(v).trim();
+  const m = str.match(/^(\d{4})[.\-\/\s]+(\d{1,2})[.\-\/\s]+(\d{1,2})/);
+  return m ? `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}` : str;
+};
 
 /* -------------------------------- 시드 데이터 -------------------------------- */
 const seedInventory = () => ([
@@ -1063,13 +1074,74 @@ function withPurchaseBalance(purchases, withdrawals) {
   });
 }
 function bankRunningBalance(bankOpening, bankTxns) {
-  const sorted = [...bankTxns].sort((a, b) => a.date.localeCompare(b.date));
-  let bal = bankOpening;
+  const sorted = bankTxns.map(t => ({ ...t, date: normDate(t.date) })).sort((a, b) => a.date.localeCompare(b.date));
+  let bal = Number(bankOpening) || 0;
   return sorted.map(t => {
-    bal += t.type === "입금" ? t.amount : -t.amount;
+    bal += t.type === "입금" ? Number(t.amount) : -Number(t.amount);
     return { ...t, balance: bal };
   });
 }
+// 아직 입금·출금 대장에 반영되지 않은 통장거래 찾기 (반영된 행에는 bankTxnId가 기록됨)
+function pendingBankReflect(bankTxns, deposits, withdrawals) {
+  const done = new Set([...deposits, ...withdrawals].map(x => x.bankTxnId).filter(Boolean));
+  const pending = bankTxns.filter(t => !done.has(t.id));
+  return { dep: pending.filter(t => t.type === "입금"), wd: pending.filter(t => t.type === "출금") };
+}
+
+function BankReflectCard({ bankTxns, deposits, setDeposits, withdrawals, setWithdrawals }) {
+  const [msg, setMsg] = useState("");
+  const { dep, wd } = pendingBankReflect(bankTxns, deposits, withdrawals);
+  const sum = (arr) => arr.reduce((a, t) => a + (Number(t.amount) || 0), 0);
+
+  const reflect = () => {
+    const nDep = dep.length, nWd = wd.length;
+    if (!nDep && !nWd) return;
+    if (nDep) setDeposits(list => {
+      const have = new Set(list.map(x => x.bankTxnId).filter(Boolean));
+      let no = list.reduce((m, d) => Math.max(m, Number(d.no) || 0), 0);
+      const add = dep.filter(t => !have.has(t.id)).map(t => ({
+        id: uid(), no: ++no, date: normDate(t.date), partner: t.desc, saleNo: null, amount: Number(t.amount) || 0,
+        bank: "통장거래", category: "통장입금", memo: "", bankTxnId: t.id,
+      }));
+      return [...list, ...add];
+    });
+    if (nWd) setWithdrawals(list => {
+      const have = new Set(list.map(x => x.bankTxnId).filter(Boolean));
+      let no = list.reduce((m, w) => Math.max(m, Number(w.no) || 0), 0);
+      const add = wd.filter(t => !have.has(t.id)).map(t => ({
+        id: uid(), no: ++no, date: normDate(t.date), partner: t.desc, purchaseNo: null, amount: Number(t.amount) || 0,
+        bank: "통장거래", category: "통장출금", memo: "", bankTxnId: t.id,
+      }));
+      return [...list, ...add];
+    });
+    setMsg(`입금 ${nDep}건 · 출금 ${nWd}건을 입금·출금 대장에 반영했습니다. (대시보드·지출캘린더에도 바로 나타납니다)`);
+  };
+
+  const none = !dep.length && !wd.length;
+  return (
+    <Card>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>통장거래 → 입금·출금 반영</div>
+          <div style={{ fontSize: 12, color: none ? C.faint : C.ink }}>
+            {none
+              ? "통장거래가 모두 입금·출금 대장에 반영되어 있습니다."
+              : <>아직 반영되지 않은 통장거래: <b style={{ color: C.teal }}>입금 {dep.length}건 ({won(sum(dep))})</b> · <b style={{ color: C.pink }}>출금 {wd.length}건 ({won(sum(wd))})</b></>}
+          </div>
+        </div>
+        <button style={{ ...btnPrimary, opacity: none ? 0.5 : 1, cursor: none ? "not-allowed" : "pointer" }} disabled={none} onClick={reflect}>
+          <ArrowDownCircle size={14} />통장거래 반영하기
+        </button>
+      </div>
+      {msg && <div style={{ fontSize: 12, color: C.primary, fontWeight: 700, marginTop: 8 }}>{msg}</div>}
+      <div style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.6 }}>
+        · 이미 반영된 거래는 다시 추가되지 않습니다. 새 통장거래를 올릴 때마다 이 버튼을 다시 누르면 됩니다.<br />
+        · 반영된 입금은 입금·출금 탭에서 "연결" 칸을 눌러 해당 매출(미수금)에, 출금은 매입(미지급금)에 연결할 수 있습니다.
+      </div>
+    </Card>
+  );
+}
+
 function monthlyStats(sales, purchases, cards) {
   const map = {};
   const ensure = (mk) => { if (!map[mk]) map[mk] = { month: mk, sales: 0, purchases: 0, cards: 0 }; return map[mk]; };
@@ -1303,7 +1375,7 @@ function PurchaseLedger({ purchases, setPurchases, withdrawals }) {
 }
 
 /* --------------------------------- 회계 · 입금·출금 --------------------------------- */
-function CashflowLedger({ sales, purchases, deposits, setDeposits, withdrawals, setWithdrawals }) {
+function CashflowLedger({ sales, purchases, deposits, setDeposits, withdrawals, setWithdrawals, bankTxns }) {
   const openSales = withSalesBalance(sales, deposits).filter(s => s.balance > 0).sort((a, b) => b.date.localeCompare(a.date));
   const openPurchases = withPurchaseBalance(purchases, withdrawals).filter(p => p.balance > 0).sort((a, b) => b.date.localeCompare(a.date));
 
@@ -1331,15 +1403,19 @@ function CashflowLedger({ sales, purchases, deposits, setDeposits, withdrawals, 
     setWithdrawals(w => [...w, { id: uid(), no, date: wdForm.date, partner: wdForm.partner, purchaseNo: wdForm.purchaseNo ? Number(wdForm.purchaseNo) : null, amount: Number(wdForm.amount), bank: wdForm.bank, category: "매입지급", memo: wdForm.memo }]);
     setWdForm(f => ({ ...f, purchaseNo: "", partner: "", amount: "", memo: "" }));
   };
+  const linkDeposit = (id, v) => setDeposits(d => d.map(x => x.id === id ? { ...x, saleNo: v ? Number(v) : null } : x));
+  const linkWithdrawal = (id, v) => setWithdrawals(w => w.map(x => x.id === id ? { ...x, purchaseNo: v ? Number(v) : null } : x));
   const removeDeposit = (id) => setDeposits(d => d.filter(x => x.id !== id));
   const removeWithdrawal = (id) => setWithdrawals(w => w.filter(x => x.id !== id));
 
   const depRows = [...deposits].sort((a, b) => b.date.localeCompare(a.date));
   const wdRows = [...withdrawals].sort((a, b) => b.date.localeCompare(a.date));
-  const ROWGRID = "84px 110px 60px 110px 130px 1fr 32px";
+  const ROWGRID = "84px 110px 96px 110px 130px 1fr 32px";
+  const linkSel = { ...inputStyle, padding: "3px 4px", fontSize: 11, width: "100%", boxSizing: "border-box" };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <BankReflectCard bankTxns={bankTxns || []} deposits={deposits} setDeposits={setDeposits} withdrawals={withdrawals} setWithdrawals={setWithdrawals} />
       <Card>
         <div style={{ fontSize: 13, fontWeight: 700, color: C.teal, marginBottom: 12 }}>입금 등록 (매출 회수)</div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
@@ -1357,19 +1433,25 @@ function CashflowLedger({ sales, purchases, deposits, setDeposits, withdrawals, 
         <div style={{ overflowX: "auto" }}>
           <div style={{ minWidth: 820 }}>
             <div style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, fontSize: 10.5, color: C.faint, fontWeight: 700, padding: "0 0 6px" }}>
-              <span>날짜</span><span>거래처</span><span>매출#</span><span style={{ textAlign: "right" }}>입금액</span><span>입금통장</span><span>비고</span><span />
+              <span>날짜</span><span>거래처</span><span>매출# 연결</span><span style={{ textAlign: "right" }}>입금액</span><span>입금통장</span><span>비고</span><span />
             </div>
+            <div style={{ maxHeight: 460, overflowY: "auto" }}>
             {depRows.map(r => (
               <div key={r.id} style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, alignItems: "center", fontSize: 12.5, padding: "7px 0", borderBottom: "1px solid #F5F6F3" }}>
                 <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{r.date}</span>
                 <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.partner}</span>
-                <span style={{ color: C.faint, fontFamily: MONO }}>{r.saleNo ? "#" + r.saleNo : "-"}</span>
+                <select value={r.saleNo || ""} onChange={e => linkDeposit(r.id, e.target.value)} style={linkSel} title="이 입금을 어느 매출의 수금으로 처리할지 선택">
+                  <option value="">미연결</option>
+                  {r.saleNo && !openSales.some(s => s.no === r.saleNo) ? <option value={r.saleNo}>#{r.saleNo}</option> : null}
+                  {openSales.map(s => (<option key={s.id} value={s.no}>#{s.no} {s.partner} · 잔액 {won(s.balance)}</option>))}
+                </select>
                 <span style={{ fontFamily: MONO, textAlign: "right", color: C.teal, fontWeight: 700 }}>{won(r.amount)}</span>
                 <span style={{ color: C.sub, fontSize: 11.5 }}>{r.bank}</span>
                 <span style={{ color: C.sub, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.memo}</span>
                 <IconBtn danger onClick={() => removeDeposit(r.id)}><Trash2 size={13} /></IconBtn>
               </div>
             ))}
+            </div>
           </div>
         </div>
       </Card>
@@ -1391,19 +1473,25 @@ function CashflowLedger({ sales, purchases, deposits, setDeposits, withdrawals, 
         <div style={{ overflowX: "auto" }}>
           <div style={{ minWidth: 820 }}>
             <div style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, fontSize: 10.5, color: C.faint, fontWeight: 700, padding: "0 0 6px" }}>
-              <span>날짜</span><span>거래처</span><span>매입#</span><span style={{ textAlign: "right" }}>출금액</span><span>출금통장</span><span>비고</span><span />
+              <span>날짜</span><span>거래처</span><span>매입# 연결</span><span style={{ textAlign: "right" }}>출금액</span><span>출금통장</span><span>비고</span><span />
             </div>
+            <div style={{ maxHeight: 460, overflowY: "auto" }}>
             {wdRows.map(r => (
               <div key={r.id} style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, alignItems: "center", fontSize: 12.5, padding: "7px 0", borderBottom: "1px solid #F5F6F3" }}>
                 <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{r.date}</span>
                 <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.partner}</span>
-                <span style={{ color: C.faint, fontFamily: MONO }}>{r.purchaseNo ? "#" + r.purchaseNo : "-"}</span>
+                <select value={r.purchaseNo || ""} onChange={e => linkWithdrawal(r.id, e.target.value)} style={linkSel} title="이 출금을 어느 매입의 지급으로 처리할지 선택">
+                  <option value="">미연결</option>
+                  {r.purchaseNo && !openPurchases.some(p => p.no === r.purchaseNo) ? <option value={r.purchaseNo}>#{r.purchaseNo}</option> : null}
+                  {openPurchases.map(p => (<option key={p.id} value={p.no}>#{p.no} {p.partner} · 잔액 {won(p.balance)}</option>))}
+                </select>
                 <span style={{ fontFamily: MONO, textAlign: "right", color: C.pink, fontWeight: 700 }}>{won(r.amount)}</span>
                 <span style={{ color: C.sub, fontSize: 11.5 }}>{r.bank}</span>
                 <span style={{ color: C.sub, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.memo}</span>
                 <IconBtn danger onClick={() => removeWithdrawal(r.id)}><Trash2 size={13} /></IconBtn>
               </div>
             ))}
+            </div>
           </div>
         </div>
       </Card>
@@ -1632,7 +1720,7 @@ function ExpenseCalendar({ withdrawals, cards }) {
 }
 
 /* --------------------------------- 회계 · 통장거래 내역 --------------------------------- */
-function BankLedger({ bankTxns, setBankTxns, bankOpening, setBankOpening }) {
+function BankLedger({ bankTxns, setBankTxns, bankOpening, setBankOpening, deposits, setDeposits, withdrawals, setWithdrawals }) {
   const [form, setForm] = useState({ date: today(), type: "입금", desc: "", amount: "" });
   const rows = bankRunningBalance(bankOpening, bankTxns);
   const add = () => {
@@ -1646,6 +1734,7 @@ function BankLedger({ bankTxns, setBankTxns, bankOpening, setBankOpening }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <BankReflectCard bankTxns={bankTxns} deposits={deposits} setDeposits={setDeposits} withdrawals={withdrawals} setWithdrawals={setWithdrawals} />
       <Card>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 14 }}>
           <div>
@@ -1865,11 +1954,11 @@ function Accounting({ sales, setSales, purchases, setPurchases, deposits, setDep
       {sub === "dashboard" && <AccDashboardSub sales={sales} purchases={purchases} deposits={deposits} withdrawals={withdrawals} cards={cards} bankTxns={bankTxns} bankOpening={bankOpening} />}
       {sub === "sales" && <SalesLedger sales={sales} setSales={setSales} deposits={deposits} />}
       {sub === "purchases" && <PurchaseLedger purchases={purchases} setPurchases={setPurchases} withdrawals={withdrawals} />}
-      {sub === "cashflow" && <CashflowLedger sales={sales} purchases={purchases} deposits={deposits} setDeposits={setDeposits} withdrawals={withdrawals} setWithdrawals={setWithdrawals} />}
+      {sub === "cashflow" && <CashflowLedger sales={sales} purchases={purchases} deposits={deposits} setDeposits={setDeposits} withdrawals={withdrawals} setWithdrawals={setWithdrawals} bankTxns={bankTxns} />}
       {sub === "card" && <CardLedger cards={cards} setCards={setCards} />}
       {sub === "balance" && <BalanceView sales={sales} deposits={deposits} purchases={purchases} withdrawals={withdrawals} />}
       {sub === "calendar" && <ExpenseCalendar withdrawals={withdrawals} cards={cards} />}
-      {sub === "bank" && <BankLedger bankTxns={bankTxns} setBankTxns={setBankTxns} bankOpening={bankOpening} setBankOpening={setBankOpening} />}
+      {sub === "bank" && <BankLedger bankTxns={bankTxns} setBankTxns={setBankTxns} bankOpening={bankOpening} setBankOpening={setBankOpening} deposits={deposits} setDeposits={setDeposits} withdrawals={withdrawals} setWithdrawals={setWithdrawals} />}
     </div>
   );
 }
@@ -2802,7 +2891,9 @@ function DBManager({ datasets }) {
   };
 
   const parseSheet = (ws, current) => {
-    const rows = XLSX.utils.sheet_to_json(ws, { defval: "", raw: true });
+    const rawRows = XLSX.utils.sheet_to_json(ws, { defval: "", raw: true });
+    // 열 제목 앞뒤 공백 제거 (엑셀 서식 때문에 " amount " 처럼 읽히는 경우가 있음)
+    const rows = rawRows.map(r => { const o = {}; Object.keys(r).forEach(k => { o[k.trim()] = r[k]; }); return o; });
     // 단일 값(예산, 기초잔액 등)
     if (!Array.isArray(current)) {
       if (!rows.length || !(SCALAR_COL in rows[0])) throw new Error("단일 값 시트 형식이 아닙니다");
@@ -2813,6 +2904,9 @@ function DBManager({ datasets }) {
     // 목록(배열)
     if (rows.length && (SCALAR_COL in rows[0]) && Object.keys(rows[0]).length === 1) throw new Error("목록 시트 형식이 아닙니다");
     const hasId = rows.length ? ("id" in rows[0]) : false;
+    // 기존 데이터에서 숫자였던 열(금액·수량 등)은 "1,234" 같은 문자로 와도 숫자로 변환
+    const sample = current.find(x => x && typeof x === "object") || {};
+    const numKeys = new Set(Object.keys(sample).filter(k => typeof sample[k] === "number"));
     return rows
       .filter(r => Object.values(r).some(v => v !== "" && v !== null && v !== undefined))
       .map(r => {
@@ -2822,8 +2916,14 @@ function DBManager({ datasets }) {
           if (typeof v === "string" && v.startsWith(JSON_MARK)) {
             try { v = JSON.parse(v.slice(JSON_MARK.length)); } catch { /* 문자열 그대로 둠 */ }
           }
+          if (numKeys.has(k) && typeof v === "string") {
+            const n = Number(v.replace(/[,\s₩원]/g, ""));
+            v = v.trim() === "" ? 0 : (Number.isFinite(n) ? n : v);
+          }
           o[k] = v;
         });
+        if ("date" in o) o.date = normDate(o.date);
+        if ("due" in o) o.due = normDate(o.due);
         if (hasId && !o.id) o.id = uid();
         return o;
       });
@@ -3224,6 +3324,7 @@ function AppShell({ userEmail, onSignOut }) {
   const visibleNavItems = navItems.filter(n => canSee(n.key));
   const activeTab = canSee(tab) ? tab : null;
 
+  // (뒤에서 정의되는 dbSets 를 쓰는 복구 로직은 아래 dbSets 정의 뒤에 있음)
   // 관리자가 내 메뉴를 숨기면(현재 보던 탭 포함) 보이는 첫 메뉴로 이동
   useEffect(() => {
     if (!access.ready || canSee(tab)) return;
@@ -3251,6 +3352,21 @@ function AppShell({ userEmail, onSignOut }) {
     { label: "나의메모", value: myNotes, set: setMyNotes },
     { label: "거래처마스터", value: partners, set: setPartners },
   ];
+
+  // 열 이름에 앞뒤 공백이 섞여 저장된 데이터(예: " amount ")를 자동으로 바로잡음
+  useEffect(() => {
+    if (loading) return;
+    dbSets.forEach(ds => {
+      if (!Array.isArray(ds.value)) return;
+      const dirty = ds.value.some(r => r && typeof r === "object" && Object.keys(r).some(k => k !== k.trim()));
+      if (!dirty) return;
+      ds.set(ds.value.map(r => {
+        const o = {};
+        Object.keys(r).forEach(k => { const t = k.trim(); if (t === k || !(t in r)) o[t] = r[k]; });
+        return o;
+      }));
+    });
+  });
 
   if (loading) {
     return (
