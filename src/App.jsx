@@ -131,6 +131,29 @@ const MONO = `"IBM Plex Mono","SFMono-Regular",Consolas,monospace`;
 const uid = () => Math.random().toString(36).slice(2, 10);
 const today = () => new Date().toISOString().slice(0, 10);
 const won = (n) => `₩${Number(n || 0).toLocaleString("ko-KR")}`;
+// 금액을 한글로 읽기: 8000000 → "팔백만 원", 123456789 → "일억 이천삼백사십오만 육천칠백팔십구 원"
+const koreanWon = (n) => {
+  const num = Math.floor(Math.abs(Number(n) || 0));
+  if (!num) return "영 원";
+  const DIG = ["", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"];
+  const SMALL = ["", "십", "백", "천"];
+  const BIG = ["", "만", "억", "조", "경"];
+  const digits = String(num);
+  const groups = [];
+  for (let i = digits.length; i > 0; i -= 4) groups.unshift(digits.slice(Math.max(0, i - 4), i));
+  const out = groups.map((g, gi) => {
+    const bigUnit = BIG[groups.length - 1 - gi];
+    let word = "";
+    for (let i = 0; i < g.length; i++) {
+      const d = Number(g[i]);
+      const pos = g.length - 1 - i;
+      if (!d) continue;
+      word += (d === 1 && pos > 0 ? "" : DIG[d]) + SMALL[pos];   // 십·백·천 앞의 "일"은 생략
+    }
+    return word ? word + bigUnit : "";
+  }).filter(Boolean).join(" ");
+  return (Number(n) < 0 ? "마이너스 " : "") + out + " 원";
+};
 const truncate = (s, n) => (!s ? "" : s.length > n ? s.slice(0, n) + "…" : s);
 const manwon = (n) => `${Math.round((n || 0) / 10000).toLocaleString()}만`;
 const monthKey = (dateStr) => (dateStr || "").slice(0, 7);
@@ -689,6 +712,31 @@ function CalendarView({ year, month, expenseItemsByDate, depositItemsByDate, sel
   );
 }
 
+// 금액 입력칸: 입력 중에도 천 단위 콤마가 붙고, 칸을 벗어나거나 Enter를 누르면 저장됩니다.
+function MoneyInput({ value, onCommit, style }) {
+  const fmt = (n) => (Number(n) || 0) === 0 && n !== 0 ? "" : (Number(n) || 0).toLocaleString("ko-KR");
+  const [text, setText] = useState(fmt(value));
+  useEffect(() => { setText(fmt(value)); }, [value]);
+  const commit = () => {
+    const n = Number(String(text).replace(/[^0-9]/g, "")) || 0;
+    setText(fmt(n));
+    if (n !== (Number(value) || 0)) onCommit(n);
+  };
+  return (
+    <input
+      inputMode="numeric"
+      value={text}
+      onChange={e => {
+        const digits = e.target.value.replace(/[^0-9]/g, "").slice(0, 15);
+        setText(digits ? Number(digits).toLocaleString("ko-KR") : "");
+      }}
+      onBlur={commit}
+      onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }}
+      style={style}
+    />
+  );
+}
+
 function Dashboard({ withdrawals, cards, deposits, budget, setBudget, ceoNotes, setCeoNotes, myNotes, setMyNotes }) {
   const [cal, setCal] = useState(() => {
     const d = new Date(today());
@@ -738,11 +786,14 @@ function Dashboard({ withdrawals, cards, deposits, budget, setBudget, ceoNotes, 
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
               <span style={{ fontSize: 15, color: C.chestnut, fontWeight: 700 }}>₩</span>
-              <input type="number" value={budget} onChange={e => setBudget(Number(e.target.value))}
+              <MoneyInput value={budget} onCommit={setBudget}
                 style={{
-                  ...inputStyle, width: 180, fontSize: 20, fontWeight: 800, fontFamily: MONO,
+                  ...inputStyle, width: 200, fontSize: 20, fontWeight: 800, fontFamily: MONO, textAlign: "right",
                   color: C.chestnut, background: C.chestnutSoft, border: `1px solid ${C.chestnut}55`,
                 }} />
+            </div>
+            <div style={{ fontSize: 12.5, color: C.chestnut, fontWeight: 700, marginTop: 6 }}>
+              {koreanWon(budget)}
             </div>
           </div>
           <div style={{ minWidth: 220, flex: 1, maxWidth: 320 }}>
@@ -1100,8 +1151,8 @@ function BankReflectCard({ bankTxns, deposits, setDeposits, withdrawals, setWith
       const have = new Set(list.map(x => x.bankTxnId).filter(Boolean));
       let no = list.reduce((m, d) => Math.max(m, Number(d.no) || 0), 0);
       const add = dep.filter(t => !have.has(t.id)).map(t => ({
-        id: uid(), no: ++no, date: normDate(t.date), partner: t.desc, saleNo: null, amount: Number(t.amount) || 0,
-        bank: "통장거래", category: "통장입금", memo: "", bankTxnId: t.id,
+        id: uid(), no: ++no, date: normDate(t.date), partner: t.partner || t.desc, saleNo: null, amount: Number(t.amount) || 0,
+        bank: "통장거래", category: t.account || "통장입금", memo: t.memo || "", bankTxnId: t.id,
       }));
       return [...list, ...add];
     });
@@ -1109,8 +1160,8 @@ function BankReflectCard({ bankTxns, deposits, setDeposits, withdrawals, setWith
       const have = new Set(list.map(x => x.bankTxnId).filter(Boolean));
       let no = list.reduce((m, w) => Math.max(m, Number(w.no) || 0), 0);
       const add = wd.filter(t => !have.has(t.id)).map(t => ({
-        id: uid(), no: ++no, date: normDate(t.date), partner: t.desc, purchaseNo: null, amount: Number(t.amount) || 0,
-        bank: "통장거래", category: "통장출금", memo: "", bankTxnId: t.id,
+        id: uid(), no: ++no, date: normDate(t.date), partner: t.partner || t.desc, purchaseNo: null, amount: Number(t.amount) || 0,
+        bank: "통장거래", category: t.account || "통장출금", memo: t.memo || "", bankTxnId: t.id,
       }));
       return [...list, ...add];
     });
@@ -1721,20 +1772,76 @@ function ExpenseCalendar({ withdrawals, cards }) {
 
 /* --------------------------------- 회계 · 통장거래 내역 --------------------------------- */
 function BankLedger({ bankTxns, setBankTxns, bankOpening, setBankOpening, deposits, setDeposits, withdrawals, setWithdrawals }) {
-  const [form, setForm] = useState({ date: today(), type: "입금", desc: "", amount: "" });
+  const emptyForm = { date: today(), type: "입금", desc: "", amount: "", account: "", partner: "", memo: "" };
+  const [form, setForm] = useState(emptyForm);
+  const [sort, setSort] = useState({ key: "date", dir: "desc" });   // 기본: 최신 거래가 맨 위
+  const [fType, setFType] = useState("전체");
+  const [q, setQ] = useState("");
+
+  // 잔액은 날짜 순(오래된 것부터)으로 계산해 두고, 화면에서만 원하는 순서로 정렬합니다.
   const rows = bankRunningBalance(bankOpening, bankTxns);
+  const latestBalance = rows.length ? rows[rows.length - 1].balance : bankOpening;
+
   const add = () => {
     if (!form.desc || !form.amount) return;
-    setBankTxns(t => [...t, { id: uid(), date: form.date, type: form.type, desc: form.desc, amount: Number(form.amount) }]);
-    setForm(f => ({ ...f, desc: "", amount: "" }));
+    setBankTxns(t => [...t, {
+      id: uid(), date: form.date, type: form.type, desc: form.desc, amount: Number(form.amount),
+      account: form.account, partner: form.partner, memo: form.memo,
+    }]);
+    setForm(f => ({ ...f, desc: "", amount: "", account: "", partner: "", memo: "" }));
   };
   const remove = (id) => setBankTxns(t => t.filter(x => x.id !== id));
-  const latestBalance = rows.length ? rows[rows.length - 1].balance : bankOpening;
-  const ROWGRID = "90px 55px 1fr 110px 110px 120px 32px";
+  const update = (id, patch) => setBankTxns(t => t.map(x => x.id === id ? { ...x, ...patch } : x));
+
+  const COLS = [
+    { key: "date", label: "날짜", w: "92px", first: "desc" },
+    { key: "type", label: "구분", w: "58px", first: "asc" },
+    { key: "desc", label: "내용", w: "minmax(150px, 1fr)", first: "asc" },
+    { key: "in", label: "입금액", w: "108px", first: "desc", right: true },
+    { key: "out", label: "출금액", w: "108px", first: "desc", right: true },
+    { key: "balance", label: "잔액", w: "118px", first: "desc", right: true },
+    { key: "account", label: "계정과목", w: "112px", first: "asc" },
+    { key: "partner", label: "거래처", w: "124px", first: "asc" },
+    { key: "memo", label: "비고", w: "minmax(120px, 0.7fr)", first: "asc" },
+  ];
+  const ROWGRID = COLS.map(c => c.w).join(" ") + " 32px";
+
+  const toggleSort = (c) => setSort(s => s.key === c.key ? { key: c.key, dir: s.dir === "asc" ? "desc" : "asc" } : { key: c.key, dir: c.first });
+
+  const sortVal = (r, key) => {
+    if (key === "in") return r.type === "입금" ? Number(r.amount) || 0 : 0;
+    if (key === "out") return r.type === "출금" ? Number(r.amount) || 0 : 0;
+    if (key === "balance") return r.balance;
+    return r[key] ?? "";
+  };
+
+  const kw = q.trim().toLowerCase();
+  let view = rows.map((r, i) => ({ ...r, _i: i })).filter(r =>
+    (fType === "전체" || r.type === fType) &&
+    (!kw || [r.desc, r.account, r.partner, r.memo].some(s => String(s || "").toLowerCase().includes(kw)))
+  );
+  const sign = sort.dir === "asc" ? 1 : -1;
+  view.sort((a, b) => {
+    const va = sortVal(a, sort.key), vb = sortVal(b, sort.key);
+    let c = (typeof va === "number" && typeof vb === "number") ? va - vb : String(va).localeCompare(String(vb), "ko");
+    if (c === 0) c = a.date.localeCompare(b.date) || (a._i - b._i);   // 같을 땐 등록 순서 기준
+    return c * sign;
+  });
+
+  const viewIn = view.reduce((s, r) => s + (r.type === "입금" ? Number(r.amount) || 0 : 0), 0);
+  const viewOut = view.reduce((s, r) => s + (r.type === "출금" ? Number(r.amount) || 0 : 0), 0);
+
+  const accountOptions = [...new Set([
+    "매출수금", "매입지급", "급여", "임차료", "운송비", "원부자재", "복리후생비", "세금과공과", "수수료", "이자", "기타",
+    ...bankTxns.map(t => t.account).filter(Boolean),
+  ])];
+  const cellStyle = { fontSize: 12 };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <BankReflectCard bankTxns={bankTxns} deposits={deposits} setDeposits={setDeposits} withdrawals={withdrawals} setWithdrawals={setWithdrawals} />
+      <datalist id="bank-account-list">{accountOptions.map(a => <option key={a} value={a} />)}</datalist>
+
       <Card>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 14 }}>
           <div>
@@ -1748,6 +1855,7 @@ function BankLedger({ bankTxns, setBankTxns, bankOpening, setBankOpening, deposi
           </div>
         </div>
       </Card>
+
       <Card>
         <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>거래 등록</div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -1755,32 +1863,67 @@ function BankLedger({ bankTxns, setBankTxns, bankOpening, setBankOpening, deposi
           <select value={form.type} onChange={e => setForm(f => ({ ...f, type: e.target.value }))} style={inputStyle}>
             <option value="입금">입금</option><option value="출금">출금</option>
           </select>
-          <input placeholder="내용" value={form.desc} onChange={e => setForm(f => ({ ...f, desc: e.target.value }))} style={{ ...inputStyle, flex: 1, minWidth: 180 }} />
-          <input placeholder="금액" type="number" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} style={{ ...inputStyle, width: 130 }} />
+          <input placeholder="내용" value={form.desc} onChange={e => setForm(f => ({ ...f, desc: e.target.value }))} style={{ ...inputStyle, flex: 1, minWidth: 160 }} />
+          <input placeholder="금액" type="number" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} style={{ ...inputStyle, width: 120 }} />
+          <input placeholder="계정과목" list="bank-account-list" value={form.account} onChange={e => setForm(f => ({ ...f, account: e.target.value }))} style={{ ...inputStyle, width: 120 }} />
+          <input placeholder="거래처" value={form.partner} onChange={e => setForm(f => ({ ...f, partner: e.target.value }))} style={{ ...inputStyle, width: 130 }} />
+          <input placeholder="비고" value={form.memo} onChange={e => setForm(f => ({ ...f, memo: e.target.value }))} onKeyDown={e => { if (e.key === "Enter") add(); }} style={{ ...inputStyle, minWidth: 130 }} />
           <button style={btnPrimary} onClick={add}><Plus size={14} />등록</button>
         </div>
       </Card>
+
       <Card>
-        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>통장거래 내역</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>
+            통장거래 내역
+            <span style={{ fontWeight: 500, color: C.faint, fontSize: 12, marginLeft: 8 }}>
+              {view.length}건 · 입금 <span style={{ color: C.teal }}>{won(viewIn)}</span> · 출금 <span style={{ color: C.pink }}>{won(viewOut)}</span>
+            </span>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <select value={fType} onChange={e => setFType(e.target.value)} style={inputStyle}>
+              <option value="전체">구분 전체</option><option value="입금">입금</option><option value="출금">출금</option>
+            </select>
+            <input placeholder="내용·계정과목·거래처·비고 검색" value={q} onChange={e => setQ(e.target.value)} style={{ ...inputStyle, minWidth: 210 }} />
+          </div>
+        </div>
         <div style={{ overflowX: "auto" }}>
-          <div style={{ minWidth: 780 }}>
-            <div style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, fontSize: 10.5, color: C.faint, fontWeight: 700, padding: "0 0 6px" }}>
-              <span>날짜</span><span>구분</span><span>내용</span><span style={{ textAlign: "right" }}>입금액</span><span style={{ textAlign: "right" }}>출금액</span><span style={{ textAlign: "right" }}>잔액</span><span />
+          <div style={{ minWidth: 1180 }}>
+            <div style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, padding: "0 0 6px", borderBottom: `1px solid ${C.border}` }}>
+              {COLS.map(c => {
+                const active = sort.key === c.key;
+                return (
+                  <button key={c.key} onClick={() => toggleSort(c)} title="누르면 정렬 (다시 누르면 오름/내림차순 전환)" style={{
+                    border: "none", background: "transparent", cursor: "pointer", padding: 0, fontFamily: FONT,
+                    textAlign: c.right ? "right" : "left", fontSize: 10.5, fontWeight: 700, color: active ? C.primary : C.faint,
+                  }}>
+                    {c.label}{active ? (sort.dir === "asc" ? " ▲" : " ▼") : ""}
+                  </button>
+                );
+              })}
+              <span />
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, alignItems: "center", fontSize: 12.5, padding: "7px 0", borderBottom: "1px solid #F5F6F3", color: C.faint, fontWeight: 700 }}>
-              <span>-</span><span>기초</span><span>이월 잔액</span><span /><span /><span style={{ textAlign: "right", fontFamily: MONO }}>{won(bankOpening)}</span><span />
+            <div style={{ maxHeight: 620, overflowY: "auto" }}>
+              {view.map(r => (
+                <div key={r.id} style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, alignItems: "center", fontSize: 12.5, padding: "5px 0", borderBottom: "1px solid #F5F6F3" }}>
+                  <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{r.date}</span>
+                  <Badge tone={r.type === "입금" ? "teal" : "pink"}>{r.type}</Badge>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.desc}>{r.desc}</span>
+                  <span style={{ fontFamily: MONO, textAlign: "right", color: C.teal }}>{r.type === "입금" ? won(r.amount) : ""}</span>
+                  <span style={{ fontFamily: MONO, textAlign: "right", color: C.pink }}>{r.type === "출금" ? won(r.amount) : ""}</span>
+                  <span style={{ fontFamily: MONO, textAlign: "right", fontWeight: 700 }}>{won(r.balance)}</span>
+                  <CellInput value={r.account} list="bank-account-list" placeholder="계정과목" onCommit={v => update(r.id, { account: v })} style={cellStyle} />
+                  <CellInput value={r.partner} placeholder="거래처" onCommit={v => update(r.id, { partner: v })} style={cellStyle} />
+                  <CellInput value={r.memo} placeholder="비고" onCommit={v => update(r.id, { memo: v })} style={cellStyle} />
+                  <IconBtn danger onClick={() => remove(r.id)}><Trash2 size={13} /></IconBtn>
+                </div>
+              ))}
+              {view.length === 0 && <div style={{ fontSize: 12, color: C.faint, padding: "16px 0" }}>조건에 맞는 거래가 없습니다.</div>}
             </div>
-            {rows.map(r => (
-              <div key={r.id} style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, alignItems: "center", fontSize: 12.5, padding: "7px 0", borderBottom: "1px solid #F5F6F3" }}>
-                <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{r.date}</span>
-                <Badge tone={r.type === "입금" ? "teal" : "pink"}>{r.type}</Badge>
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.desc}</span>
-                <span style={{ fontFamily: MONO, textAlign: "right", color: C.teal }}>{r.type === "입금" ? won(r.amount) : ""}</span>
-                <span style={{ fontFamily: MONO, textAlign: "right", color: C.pink }}>{r.type === "출금" ? won(r.amount) : ""}</span>
-                <span style={{ fontFamily: MONO, textAlign: "right", fontWeight: 700 }}>{won(r.balance)}</span>
-                <IconBtn danger onClick={() => remove(r.id)}><Trash2 size={13} /></IconBtn>
-              </div>
-            ))}
+            {/* 기초 이월잔액: 정렬·검색과 상관없이 항상 표의 맨 마지막 줄에 고정 */}
+            <div style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, alignItems: "center", fontSize: 12.5, padding: "9px 0 2px", borderTop: `1px solid ${C.border}`, color: C.sub, fontWeight: 700 }}>
+              <span>-</span><span>기초</span><span>이월 잔액</span><span /><span /><span style={{ textAlign: "right", fontFamily: MONO }}>{won(bankOpening)}</span><span /><span /><span /><span />
+            </div>
           </div>
         </div>
       </Card>
@@ -2168,13 +2311,14 @@ function TodoTab({ todos, setTodos }) {
 /* ------------------------- 업무 체크리스트 탭 (표 형식: 바로 수정 · 정렬 · 필터) ------------------------- */
 // 텍스트 칸은 입력 중에는 이 칸 안에서만 바뀌고, 칸을 벗어나거나 Enter를 누를 때 저장됩니다.
 // (글자 하나 칠 때마다 팀 전체 DB에 저장되는 것을 막기 위함)
-function CellInput({ value, onCommit, style, placeholder }) {
+function CellInput({ value, onCommit, style, placeholder, list }) {
   const [v, setV] = useState(value ?? "");
   useEffect(() => { setV(value ?? ""); }, [value]);
   const commit = () => { if (v !== (value ?? "")) onCommit(v); };
   return (
     <input
       value={v}
+      list={list}
       placeholder={placeholder}
       onChange={e => setV(e.target.value)}
       onBlur={commit}
