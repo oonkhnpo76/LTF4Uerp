@@ -1540,6 +1540,59 @@ function PurchaseLedger({ purchases, setPurchases, withdrawals }) {
 }
 
 /* --------------------------------- 회계 · 입금·출금 --------------------------------- */
+// 입금·출금 한 줄: 연필 버튼을 누르면 그 줄이 입력칸으로 바뀌어 수정할 수 있습니다.
+function CashRow({ r, linkKey, openList, color, grid, linkSel, onLink, onSave, onRemove }) {
+  const [editing, setEditing] = useState(false);
+  const [d, setD] = useState(null);
+  const start = () => { setD({ date: r.date, partner: r.partner || "", amount: String(r.amount ?? ""), bank: r.bank || "", memo: r.memo || "" }); setEditing(true); };
+  const save = () => {
+    const amt = Number(String(d.amount).replace(/[^0-9.-]/g, ""));
+    if (!d.partner.trim() || !Number.isFinite(amt)) return;
+    onSave(r.id, { date: normDate(d.date) || r.date, partner: d.partner.trim(), amount: amt, bank: d.bank, memo: d.memo });
+    setEditing(false);
+  };
+  const cell = { ...inputStyle, padding: "3px 6px", fontSize: 12, width: "100%", boxSizing: "border-box", minWidth: 0 };
+  const rowStyle = { display: "grid", gridTemplateColumns: grid, gap: 8, alignItems: "center", fontSize: 12.5, padding: "7px 0", borderBottom: "1px solid #F5F6F3" };
+  const linkSelect = (
+    <select value={r[linkKey] || ""} onChange={e => onLink(r.id, e.target.value)} style={linkSel} title="연결할 매출/매입 선택">
+      <option value="">미연결</option>
+      {r[linkKey] && !openList.some(x => x.no === r[linkKey]) ? <option value={r[linkKey]}>#{r[linkKey]}</option> : null}
+      {openList.map(x => (<option key={x.id} value={x.no}>#{x.no} {x.partner} · 잔액 {won(x.balance)}</option>))}
+    </select>
+  );
+  if (editing) {
+    const onKey = (e) => { if (e.key === "Enter") save(); if (e.key === "Escape") setEditing(false); };
+    return (
+      <div style={{ ...rowStyle, background: "#FFFBEA" }}>
+        <input type="date" value={d.date} onChange={e => setD({ ...d, date: e.target.value })} onKeyDown={onKey} style={cell} />
+        <input value={d.partner} onChange={e => setD({ ...d, partner: e.target.value })} onKeyDown={onKey} style={cell} />
+        {linkSelect}
+        <input value={d.amount} onChange={e => setD({ ...d, amount: e.target.value.replace(/[^0-9.-]/g, "") })} onKeyDown={onKey} style={{ ...cell, textAlign: "right", fontFamily: MONO }} />
+        <input value={d.bank} onChange={e => setD({ ...d, bank: e.target.value })} onKeyDown={onKey} style={cell} />
+        <input value={d.memo} onChange={e => setD({ ...d, memo: e.target.value })} onKeyDown={onKey} style={cell} placeholder="비고" />
+        <div style={{ display: "flex", gap: 2 }}>
+          <IconBtn title="저장" onClick={save}><Check size={14} color={color} /></IconBtn>
+          <IconBtn title="취소" onClick={() => setEditing(false)}><X size={14} /></IconBtn>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div style={rowStyle}>
+      <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{r.date}</span>
+      <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.partner}>{r.partner}</span>
+      {linkSelect}
+      <span style={{ fontFamily: MONO, textAlign: "right", color, fontWeight: 700 }}>{won(r.amount)}</span>
+      <span style={{ color: C.sub, fontSize: 11.5 }}>{r.bank}</span>
+      <span style={{ color: C.sub, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.memo}>{r.memo}</span>
+      <div style={{ display: "flex", gap: 2 }}>
+        <IconBtn title="수정" onClick={start}><Pencil size={13} /></IconBtn>
+        <IconBtn danger title="삭제" onClick={() => { if (window.confirm("이 내역을 삭제할까요?")) onRemove(r.id); }}><Trash2 size={13} /></IconBtn>
+      </div>
+    </div>
+  );
+}
+
 function CashflowLedger({ sales, purchases, deposits, setDeposits, withdrawals, setWithdrawals, bankTxns }) {
   const openSales = withSalesBalance(sales, deposits).filter(s => s.balance > 0).sort((a, b) => b.date.localeCompare(a.date));
   const openPurchases = withPurchaseBalance(purchases, withdrawals).filter(p => p.balance > 0).sort((a, b) => b.date.localeCompare(a.date));
@@ -1570,12 +1623,14 @@ function CashflowLedger({ sales, purchases, deposits, setDeposits, withdrawals, 
   };
   const linkDeposit = (id, v) => setDeposits(d => d.map(x => x.id === id ? { ...x, saleNo: v ? Number(v) : null } : x));
   const linkWithdrawal = (id, v) => setWithdrawals(w => w.map(x => x.id === id ? { ...x, purchaseNo: v ? Number(v) : null } : x));
+  const saveDeposit = (id, patch) => setDeposits(d => d.map(x => x.id === id ? { ...x, ...patch } : x));
+  const saveWithdrawal = (id, patch) => setWithdrawals(w => w.map(x => x.id === id ? { ...x, ...patch } : x));
   const removeDeposit = (id) => setDeposits(d => d.filter(x => x.id !== id));
   const removeWithdrawal = (id) => setWithdrawals(w => w.filter(x => x.id !== id));
 
   const depRows = [...deposits].sort((a, b) => b.date.localeCompare(a.date));
   const wdRows = [...withdrawals].sort((a, b) => b.date.localeCompare(a.date));
-  const ROWGRID = "84px 110px 96px 110px 130px 1fr 32px";
+  const ROWGRID = "96px 120px 96px 120px 130px 1fr 62px";
   const linkSel = { ...inputStyle, padding: "3px 4px", fontSize: 11, width: "100%", boxSizing: "border-box" };
 
   return (
@@ -1596,25 +1651,14 @@ function CashflowLedger({ sales, purchases, deposits, setDeposits, withdrawals, 
           <button style={{ ...btnPrimary, background: C.teal }} onClick={addDeposit}><Plus size={14} />입금 등록</button>
         </div>
         <div style={{ overflowX: "auto" }}>
-          <div style={{ minWidth: 820 }}>
+          <div style={{ minWidth: 880 }}>
             <div style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, fontSize: 10.5, color: C.faint, fontWeight: 700, padding: "0 0 6px" }}>
               <span>날짜</span><span>거래처</span><span>매출# 연결</span><span style={{ textAlign: "right" }}>입금액</span><span>입금통장</span><span>비고</span><span />
             </div>
             <div style={{ maxHeight: 460, overflowY: "auto" }}>
             {depRows.map(r => (
-              <div key={r.id} style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, alignItems: "center", fontSize: 12.5, padding: "7px 0", borderBottom: "1px solid #F5F6F3" }}>
-                <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{r.date}</span>
-                <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.partner}</span>
-                <select value={r.saleNo || ""} onChange={e => linkDeposit(r.id, e.target.value)} style={linkSel} title="이 입금을 어느 매출의 수금으로 처리할지 선택">
-                  <option value="">미연결</option>
-                  {r.saleNo && !openSales.some(s => s.no === r.saleNo) ? <option value={r.saleNo}>#{r.saleNo}</option> : null}
-                  {openSales.map(s => (<option key={s.id} value={s.no}>#{s.no} {s.partner} · 잔액 {won(s.balance)}</option>))}
-                </select>
-                <span style={{ fontFamily: MONO, textAlign: "right", color: C.teal, fontWeight: 700 }}>{won(r.amount)}</span>
-                <span style={{ color: C.sub, fontSize: 11.5 }}>{r.bank}</span>
-                <span style={{ color: C.sub, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.memo}</span>
-                <IconBtn danger onClick={() => removeDeposit(r.id)}><Trash2 size={13} /></IconBtn>
-              </div>
+              <CashRow key={r.id} r={r} linkKey="saleNo" openList={openSales} color={C.teal} grid={ROWGRID} linkSel={linkSel}
+                onLink={linkDeposit} onSave={saveDeposit} onRemove={removeDeposit} />
             ))}
             </div>
           </div>
@@ -1636,25 +1680,14 @@ function CashflowLedger({ sales, purchases, deposits, setDeposits, withdrawals, 
           <button style={{ ...btnPrimary, background: C.pink }} onClick={addWithdrawal}><Plus size={14} />출금 등록</button>
         </div>
         <div style={{ overflowX: "auto" }}>
-          <div style={{ minWidth: 820 }}>
+          <div style={{ minWidth: 880 }}>
             <div style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, fontSize: 10.5, color: C.faint, fontWeight: 700, padding: "0 0 6px" }}>
               <span>날짜</span><span>거래처</span><span>매입# 연결</span><span style={{ textAlign: "right" }}>출금액</span><span>출금통장</span><span>비고</span><span />
             </div>
             <div style={{ maxHeight: 460, overflowY: "auto" }}>
             {wdRows.map(r => (
-              <div key={r.id} style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, alignItems: "center", fontSize: 12.5, padding: "7px 0", borderBottom: "1px solid #F5F6F3" }}>
-                <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{r.date}</span>
-                <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.partner}</span>
-                <select value={r.purchaseNo || ""} onChange={e => linkWithdrawal(r.id, e.target.value)} style={linkSel} title="이 출금을 어느 매입의 지급으로 처리할지 선택">
-                  <option value="">미연결</option>
-                  {r.purchaseNo && !openPurchases.some(p => p.no === r.purchaseNo) ? <option value={r.purchaseNo}>#{r.purchaseNo}</option> : null}
-                  {openPurchases.map(p => (<option key={p.id} value={p.no}>#{p.no} {p.partner} · 잔액 {won(p.balance)}</option>))}
-                </select>
-                <span style={{ fontFamily: MONO, textAlign: "right", color: C.pink, fontWeight: 700 }}>{won(r.amount)}</span>
-                <span style={{ color: C.sub, fontSize: 11.5 }}>{r.bank}</span>
-                <span style={{ color: C.sub, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.memo}</span>
-                <IconBtn danger onClick={() => removeWithdrawal(r.id)}><Trash2 size={13} /></IconBtn>
-              </div>
+              <CashRow key={r.id} r={r} linkKey="purchaseNo" openList={openPurchases} color={C.pink} grid={ROWGRID} linkSel={linkSel}
+                onLink={linkWithdrawal} onSave={saveWithdrawal} onRemove={removeWithdrawal} />
             ))}
             </div>
           </div>
