@@ -279,7 +279,17 @@ const seedBankTxns = () => ([
   { id: uid(), date: "2026-08-10", type: "입금", desc: "서울물산 매출대금", amount: 1500000 },
 ]);
 
-const seedBankOpening = () => 10000000;
+const BANKS = ["우리", "기업", "농협", "새마을", "신한"];
+const seedBankOpening = () => ({ 우리: 10000000, 기업: 0, 농협: 0, 새마을: 0, 신한: 0 });
+// 예전에는 숫자 하나(통장 전체 기초잔액)였음 → 우리은행 기초잔액으로 옮김
+const normalizeOpening = (v) => {
+  const o = {};
+  BANKS.forEach(b => { o[b] = 0; });
+  if (v && typeof v === "object") { BANKS.forEach(b => { o[b] = Number(v[b]) || 0; }); }
+  else o["우리"] = Number(v) || 0;
+  return o;
+};
+const bankOf = (t) => (BANKS.includes(t && t.bank) ? t.bank : "우리");   // 은행이 비어 있는 예전 거래는 우리로 봄
 
 
 const STAGES = ["주문", "재고", "생산", "출고", "매출", "세금계산서", "입금", "미수금"];
@@ -1271,13 +1281,37 @@ function withPurchaseBalance(purchases, withdrawals) {
     return { ...p, paid, balance: p.total - paid };
   });
 }
+// 은행별 잔액 계산. 각 행의 balance = 그 거래 직후 "해당 은행"의 잔액,
+// 대체(타은행이체)는 보내는 은행(bank)에서 빠지고 받는 은행(toBank)으로 들어감 → balanceTo 에 받는 은행 잔액.
 function bankRunningBalance(bankOpening, bankTxns) {
+  const open = normalizeOpening(bankOpening);
+  const bal = { ...open };
   const sorted = bankTxns.map(t => ({ ...t, date: normDate(t.date) })).sort((a, b) => a.date.localeCompare(b.date));
-  let bal = Number(bankOpening) || 0;
   return sorted.map(t => {
-    bal += t.type === "입금" ? Number(t.amount) : -Number(t.amount);
-    return { ...t, balance: bal };
+    const b = bankOf(t), amt = Number(t.amount) || 0;
+    const row = { ...t, bank: b };
+    if (t.type === "입금") bal[b] += amt;
+    else if (t.type === "출금") bal[b] -= amt;
+    else if (t.type === "대체") {
+      const to = BANKS.includes(t.toBank) ? t.toBank : null;
+      bal[b] -= amt;
+      if (to) { bal[to] += amt; row.balanceTo = bal[to]; }
+    }
+    row.balance = bal[b];
+    return row;
   });
+}
+// 은행별 현재 잔액 + 합계
+function bankTotals(bankOpening, bankTxns) {
+  const rows = bankRunningBalance(bankOpening, bankTxns);
+  const cur = normalizeOpening(bankOpening);
+  rows.forEach(r => {
+    const amt = Number(r.amount) || 0;
+    if (r.type === "입금") cur[r.bank] += amt;
+    else if (r.type === "출금") cur[r.bank] -= amt;
+    else if (r.type === "대체") { cur[r.bank] -= amt; if (BANKS.includes(r.toBank)) cur[r.toBank] += amt; }
+  });
+  return { byBank: cur, total: BANKS.reduce((a, b) => a + cur[b], 0), rows };
 }
 // 아직 입금·출금 대장에 반영되지 않은 통장거래 찾기 (반영된 행에는 bankTxnId가 기록됨)
 function pendingBankReflect(bankTxns, deposits, withdrawals) {
@@ -1299,7 +1333,7 @@ function BankReflectCard({ bankTxns, deposits, setDeposits, withdrawals, setWith
       let no = list.reduce((m, d) => Math.max(m, Number(d.no) || 0), 0);
       const add = dep.filter(t => !have.has(t.id)).map(t => ({
         id: uid(), no: ++no, date: normDate(t.date), partner: t.partner || t.desc, saleNo: null, amount: Number(t.amount) || 0,
-        bank: "통장거래", category: t.account || "통장입금", memo: t.memo || "", bankTxnId: t.id,
+        bank: (BANKS.includes(t.bank) ? t.bank + "은행" : "통장거래"), category: t.account || "통장입금", memo: t.memo || "", bankTxnId: t.id,
       }));
       return [...list, ...add];
     });
@@ -1308,7 +1342,7 @@ function BankReflectCard({ bankTxns, deposits, setDeposits, withdrawals, setWith
       let no = list.reduce((m, w) => Math.max(m, Number(w.no) || 0), 0);
       const add = wd.filter(t => !have.has(t.id)).map(t => ({
         id: uid(), no: ++no, date: normDate(t.date), partner: t.partner || t.desc, purchaseNo: null, amount: Number(t.amount) || 0,
-        bank: "통장거래", category: t.account || "통장출금", memo: t.memo || "", bankTxnId: t.id,
+        bank: (BANKS.includes(t.bank) ? t.bank + "은행" : "통장거래"), category: t.account || "통장출금", memo: t.memo || "", bankTxnId: t.id,
       }));
       return [...list, ...add];
     });
@@ -2039,37 +2073,41 @@ function ExpenseCalendar({ withdrawals, cards }) {
 
 /* --------------------------------- 회계 · 통장거래 내역 --------------------------------- */
 function BankLedger({ bankTxns, setBankTxns, bankOpening, setBankOpening, deposits, setDeposits, withdrawals, setWithdrawals }) {
-  const emptyForm = { date: today(), type: "입금", desc: "", amount: "", account: "", partner: "", memo: "" };
+  const emptyForm = { date: today(), type: "입금", bank: BANKS[0], toBank: BANKS[1], desc: "", amount: "", account: "", partner: "", memo: "" };
   const [form, setForm] = useState(emptyForm);
   const [sort, setSort] = useState({ key: "date", dir: "desc" });   // 기본: 최신 거래가 맨 위
   const [fType, setFType] = useState("전체");
+  const [fBank, setFBank] = useState("전체");
   const [q, setQ] = useState("");
 
-  // 잔액은 날짜 순(오래된 것부터)으로 계산해 두고, 화면에서만 원하는 순서로 정렬합니다.
-  const rows = bankRunningBalance(bankOpening, bankTxns);
-  const latestBalance = rows.length ? rows[rows.length - 1].balance : bankOpening;
+  const open = normalizeOpening(bankOpening);
+  // 잔액은 은행별로, 날짜 순(오래된 것부터)으로 계산해 두고 화면에서만 원하는 순서로 정렬합니다.
+  const { rows, byBank, total } = bankTotals(bankOpening, bankTxns);
 
   const add = () => {
     if (!form.desc || !form.amount) return;
+    if (form.type === "대체" && form.bank === form.toBank) { window.alert("보내는 은행과 받는 은행이 같습니다."); return; }
     setBankTxns(t => [...t, {
-      id: uid(), date: form.date, type: form.type, desc: form.desc, amount: Number(form.amount),
-      account: form.account, partner: form.partner, memo: form.memo,
+      id: uid(), date: form.date, type: form.type, bank: form.bank, ...(form.type === "대체" ? { toBank: form.toBank } : {}),
+      desc: form.desc, amount: Number(form.amount), account: form.account, partner: form.partner, memo: form.memo,
     }]);
     setForm(f => ({ ...f, desc: "", amount: "", account: "", partner: "", memo: "" }));
   };
   const remove = (id) => setBankTxns(t => t.filter(x => x.id !== id));
   const update = (id, patch) => setBankTxns(t => t.map(x => x.id === id ? { ...x, ...patch } : x));
+  const setOpen = (b, n) => setBankOpening({ ...open, [b]: n });
 
   const COLS = [
     { key: "date", label: "날짜", w: "92px", first: "desc" },
     { key: "type", label: "구분", w: "58px", first: "asc" },
+    { key: "bank", label: "은행", w: "78px", first: "asc" },
     { key: "desc", label: "내용", w: "minmax(150px, 1fr)", first: "asc" },
-    { key: "in", label: "입금액", w: "108px", first: "desc", right: true },
-    { key: "out", label: "출금액", w: "108px", first: "desc", right: true },
-    { key: "balance", label: "잔액", w: "118px", first: "desc", right: true },
-    { key: "account", label: "계정과목", w: "112px", first: "asc" },
-    { key: "partner", label: "거래처", w: "124px", first: "asc" },
-    { key: "memo", label: "비고", w: "minmax(120px, 0.7fr)", first: "asc" },
+    { key: "in", label: "입금액", w: "104px", first: "desc", right: true },
+    { key: "out", label: "출금액", w: "104px", first: "desc", right: true },
+    { key: "balance", label: "잔액(해당 은행)", w: "128px", first: "desc", right: true },
+    { key: "account", label: "계정과목", w: "108px", first: "asc" },
+    { key: "partner", label: "거래처", w: "116px", first: "asc" },
+    { key: "memo", label: "비고", w: "minmax(110px, 0.7fr)", first: "asc" },
   ];
   const ROWGRID = COLS.map(c => c.w).join(" ") + " 32px";
 
@@ -2077,7 +2115,7 @@ function BankLedger({ bankTxns, setBankTxns, bankOpening, setBankOpening, deposi
 
   const sortVal = (r, key) => {
     if (key === "in") return r.type === "입금" ? Number(r.amount) || 0 : 0;
-    if (key === "out") return r.type === "출금" ? Number(r.amount) || 0 : 0;
+    if (key === "out") return r.type === "출금" || r.type === "대체" ? Number(r.amount) || 0 : 0;
     if (key === "balance") return r.balance;
     return r[key] ?? "";
   };
@@ -2085,7 +2123,8 @@ function BankLedger({ bankTxns, setBankTxns, bankOpening, setBankOpening, deposi
   const kw = q.trim().toLowerCase();
   let view = rows.map((r, i) => ({ ...r, _i: i })).filter(r =>
     (fType === "전체" || r.type === fType) &&
-    (!kw || [r.desc, r.account, r.partner, r.memo].some(s => String(s || "").toLowerCase().includes(kw)))
+    (fBank === "전체" || r.bank === fBank || (r.type === "대체" && r.toBank === fBank)) &&
+    (!kw || [r.desc, r.account, r.partner, r.memo, r.bank, r.toBank].some(s => String(s || "").toLowerCase().includes(kw)))
   );
   const sign = sort.dir === "asc" ? 1 : -1;
   view.sort((a, b) => {
@@ -2095,14 +2134,18 @@ function BankLedger({ bankTxns, setBankTxns, bankOpening, setBankOpening, deposi
     return c * sign;
   });
 
-  const viewIn = view.reduce((s, r) => s + (r.type === "입금" ? Number(r.amount) || 0 : 0), 0);
-  const viewOut = view.reduce((s, r) => s + (r.type === "출금" ? Number(r.amount) || 0 : 0), 0);
+  const sumType = (t) => view.reduce((s, r) => s + (r.type === t ? Number(r.amount) || 0 : 0), 0);
+  const viewIn = sumType("입금"), viewOut = sumType("출금"), viewXfer = sumType("대체");
 
   const accountOptions = [...new Set([
     "매출수금", "매입지급", "급여", "임차료", "운송비", "원부자재", "복리후생비", "세금과공과", "수수료", "이자", "기타",
     ...bankTxns.map(t => t.account).filter(Boolean),
   ])];
   const cellStyle = { fontSize: 12 };
+  const TYPE_TONE = { 입금: "teal", 출금: "pink", 대체: "navy" };
+  const bankSel = { ...cellStyle, ...inputStyle, padding: "3px 4px", width: "100%", boxSizing: "border-box", minWidth: 0 };
+
+  const shownOpening = fBank === "전체" ? BANKS.reduce((a, b) => a + open[b], 0) : open[fBank];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -2110,16 +2153,22 @@ function BankLedger({ bankTxns, setBankTxns, bankOpening, setBankOpening, deposi
       <datalist id="bank-account-list">{accountOptions.map(a => <option key={a} value={a} />)}</datalist>
 
       <Card>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 14 }}>
-          <div>
-            <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>기초잔액</div>
-            <input type="number" value={bankOpening} onChange={e => setBankOpening(Number(e.target.value))}
-              style={{ ...inputStyle, width: 180, fontSize: 18, fontWeight: 800, fontFamily: MONO, color: C.teal, marginTop: 4 }} />
-          </div>
-          <div>
-            <div style={{ fontSize: 12, color: C.faint, fontWeight: 600, textAlign: "right" }}>현재 통장잔액</div>
-            <div style={{ fontSize: 24, fontWeight: 800, fontFamily: MONO, color: C.blue, marginTop: 4 }}>{won(latestBalance)}</div>
-          </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>은행별 잔액</div>
+          <div style={{ fontSize: 12, color: C.faint }}>전체 합계 <b style={{ fontSize: 16, fontFamily: MONO, color: C.blue }}>{won(total)}</b></div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+          {BANKS.map(b => (
+            <div key={b} style={{ border: `1px solid ${fBank === b ? C.primary : C.border}`, borderRadius: 10, padding: 10, background: fBank === b ? C.primarySoft : "#fff" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 12.5, fontWeight: 800 }}>{b}은행</span>
+                <button onClick={() => setFBank(fBank === b ? "전체" : b)} style={{ ...btnGhost, padding: "2px 7px", fontSize: 10.5 }}>{fBank === b ? "전체보기" : "이것만"}</button>
+              </div>
+              <div style={{ fontSize: 17, fontWeight: 800, fontFamily: MONO, color: byBank[b] < 0 ? C.red : C.blue, marginTop: 4 }}>{won(byBank[b])}</div>
+              <div style={{ fontSize: 10.5, color: C.faint, marginTop: 6 }}>기초잔액</div>
+              <MoneyInput value={open[b]} onCommit={n => setOpen(b, n)} style={{ ...inputStyle, width: "100%", boxSizing: "border-box", fontSize: 12.5, fontFamily: MONO, textAlign: "right", padding: "4px 6px" }} />
+            </div>
+          ))}
         </div>
       </Card>
 
@@ -2128,8 +2177,16 @@ function BankLedger({ bankTxns, setBankTxns, bankOpening, setBankOpening, deposi
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} style={inputStyle} />
           <select value={form.type} onChange={e => setForm(f => ({ ...f, type: e.target.value }))} style={inputStyle}>
-            <option value="입금">입금</option><option value="출금">출금</option>
+            <option value="입금">입금</option><option value="출금">출금</option><option value="대체">대체(타은행이체)</option>
           </select>
+          <select value={form.bank} onChange={e => setForm(f => ({ ...f, bank: e.target.value }))} style={inputStyle} title={form.type === "대체" ? "보내는 은행" : "은행"}>
+            {BANKS.map(b => <option key={b} value={b}>{form.type === "대체" ? `보내는 ${b}은행` : `${b}은행`}</option>)}
+          </select>
+          {form.type === "대체" && (
+            <select value={form.toBank} onChange={e => setForm(f => ({ ...f, toBank: e.target.value }))} style={inputStyle} title="받는 은행">
+              {BANKS.map(b => <option key={b} value={b}>{`받는 ${b}은행`}</option>)}
+            </select>
+          )}
           <input placeholder="내용" value={form.desc} onChange={e => setForm(f => ({ ...f, desc: e.target.value }))} style={{ ...inputStyle, flex: 1, minWidth: 160 }} />
           <input placeholder="금액" type="number" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} style={{ ...inputStyle, width: 120 }} />
           <input placeholder="계정과목" list="bank-account-list" value={form.account} onChange={e => setForm(f => ({ ...f, account: e.target.value }))} style={{ ...inputStyle, width: 120 }} />
@@ -2144,18 +2201,21 @@ function BankLedger({ bankTxns, setBankTxns, bankOpening, setBankOpening, deposi
           <div style={{ fontSize: 13, fontWeight: 700 }}>
             통장거래 내역
             <span style={{ fontWeight: 500, color: C.faint, fontSize: 12, marginLeft: 8 }}>
-              {view.length}건 · 입금 <span style={{ color: C.teal }}>{won(viewIn)}</span> · 출금 <span style={{ color: C.pink }}>{won(viewOut)}</span>
+              {view.length}건 · 입금 <span style={{ color: C.teal }}>{won(viewIn)}</span> · 출금 <span style={{ color: C.pink }}>{won(viewOut)}</span> · 대체 <span style={{ color: C.blue }}>{won(viewXfer)}</span>
             </span>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <select value={fBank} onChange={e => setFBank(e.target.value)} style={inputStyle}>
+              <option value="전체">은행 전체</option>{BANKS.map(b => <option key={b} value={b}>{b}은행</option>)}
+            </select>
             <select value={fType} onChange={e => setFType(e.target.value)} style={inputStyle}>
-              <option value="전체">구분 전체</option><option value="입금">입금</option><option value="출금">출금</option>
+              <option value="전체">구분 전체</option><option value="입금">입금</option><option value="출금">출금</option><option value="대체">대체</option>
             </select>
             <input placeholder="내용·계정과목·거래처·비고 검색" value={q} onChange={e => setQ(e.target.value)} style={{ ...inputStyle, minWidth: 210 }} />
           </div>
         </div>
         <div style={{ overflowX: "auto" }}>
-          <div style={{ minWidth: 1180 }}>
+          <div style={{ minWidth: 1260 }}>
             <div style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, padding: "0 0 6px", borderBottom: `1px solid ${C.border}` }}>
               {COLS.map(c => {
                 const active = sort.key === c.key;
@@ -2174,22 +2234,38 @@ function BankLedger({ bankTxns, setBankTxns, bankOpening, setBankOpening, deposi
               {view.map(r => (
                 <div key={r.id} style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, alignItems: "center", fontSize: 12.5, padding: "5px 0", borderBottom: "1px solid #F5F6F3" }}>
                   <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{r.date}</span>
-                  <Badge tone={r.type === "입금" ? "teal" : "pink"}>{r.type}</Badge>
+                  <Badge tone={TYPE_TONE[r.type] || "navy"}>{r.type}</Badge>
+                  <span>
+                    <select value={r.bank} onChange={e => update(r.id, { bank: e.target.value })} style={bankSel} title="은행 구분">
+                      {BANKS.map(b => <option key={b} value={b}>{b}</option>)}
+                    </select>
+                    {r.type === "대체" && (
+                      <select value={r.toBank || ""} onChange={e => update(r.id, { toBank: e.target.value })} style={{ ...bankSel, marginTop: 3, color: C.blue }} title="받는 은행">
+                        <option value="">받는곳</option>
+                        {BANKS.map(b => <option key={b} value={b}>→{b}</option>)}
+                      </select>
+                    )}
+                  </span>
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.desc}>{r.desc}</span>
                   <span style={{ fontFamily: MONO, textAlign: "right", color: C.teal }}>{r.type === "입금" ? won(r.amount) : ""}</span>
-                  <span style={{ fontFamily: MONO, textAlign: "right", color: C.pink }}>{r.type === "출금" ? won(r.amount) : ""}</span>
-                  <span style={{ fontFamily: MONO, textAlign: "right", fontWeight: 700 }}>{won(r.balance)}</span>
+                  <span style={{ fontFamily: MONO, textAlign: "right", color: r.type === "대체" ? C.blue : C.pink }}>{r.type === "출금" || r.type === "대체" ? won(r.amount) : ""}</span>
+                  <span style={{ fontFamily: MONO, textAlign: "right", fontWeight: 700 }}>
+                    {won(r.balance)}
+                    {r.type === "대체" && r.balanceTo !== undefined && (
+                      <div style={{ fontSize: 10, fontWeight: 600, color: C.blue }}>{r.toBank} {won(r.balanceTo)}</div>
+                    )}
+                  </span>
                   <CellInput value={r.account} list="bank-account-list" placeholder="계정과목" onCommit={v => update(r.id, { account: v })} style={cellStyle} />
                   <CellInput value={r.partner} placeholder="거래처" onCommit={v => update(r.id, { partner: v })} style={cellStyle} />
                   <CellInput value={r.memo} placeholder="비고" onCommit={v => update(r.id, { memo: v })} style={cellStyle} />
-                  <IconBtn danger onClick={() => remove(r.id)}><Trash2 size={13} /></IconBtn>
+                  <IconBtn danger onClick={() => { if (window.confirm("이 거래를 삭제할까요?")) remove(r.id); }}><Trash2 size={13} /></IconBtn>
                 </div>
               ))}
               {view.length === 0 && <div style={{ fontSize: 12, color: C.faint, padding: "16px 0" }}>조건에 맞는 거래가 없습니다.</div>}
             </div>
             {/* 기초 이월잔액: 정렬·검색과 상관없이 항상 표의 맨 마지막 줄에 고정 */}
             <div style={{ display: "grid", gridTemplateColumns: ROWGRID, gap: 8, alignItems: "center", fontSize: 12.5, padding: "9px 0 2px", borderTop: `1px solid ${C.border}`, color: C.sub, fontWeight: 700 }}>
-              <span>-</span><span>기초</span><span>이월 잔액</span><span /><span /><span style={{ textAlign: "right", fontFamily: MONO }}>{won(bankOpening)}</span><span /><span /><span /><span />
+              <span>-</span><span>기초</span><span>{fBank === "전체" ? "전체" : fBank}</span><span>이월 잔액</span><span /><span /><span style={{ textAlign: "right", fontFamily: MONO }}>{won(shownOpening)}</span><span /><span /><span /><span />
             </div>
           </div>
         </div>
@@ -2202,8 +2278,14 @@ function BankLedger({ bankTxns, setBankTxns, bankOpening, setBankOpening, deposi
 function AccDashboardSub({ sales, purchases, deposits, withdrawals, cards, bankTxns, bankOpening }) {
   const salesBal = withSalesBalance(sales, deposits);
   const purchaseBal = withPurchaseBalance(purchases, withdrawals);
-  const bankRows = bankRunningBalance(bankOpening, bankTxns);
-  const latestBalance = bankRows.length ? bankRows[bankRows.length - 1].balance : bankOpening;
+  const latestBalance = bankTotals(bankOpening, bankTxns).total;
+  // 잔액 추이 차트: 전체 은행 합계 기준(대체는 합계에 영향 없음)
+  let runTotal = BANKS.reduce((a, b) => a + normalizeOpening(bankOpening)[b], 0);
+  const bankRows = bankRunningBalance(bankOpening, bankTxns).map(r => {
+    const amt = Number(r.amount) || 0;
+    if (r.type === "입금") runTotal += amt; else if (r.type === "출금") runTotal -= amt;
+    return { date: r.date, balance: runTotal };
+  });
   const stats = monthlyStats(sales, purchases, cards).slice(-3);
   const curMonth = monthKey(today());
   const cur = stats.find(m => m.month === curMonth) || stats[stats.length - 1] || { sales: 0, purchases: 0, cards: 0, profit: 0 };
@@ -3309,6 +3391,7 @@ function DBManager({ datasets }) {
     if (!Array.isArray(current)) {
       if (!rows.length || !(SCALAR_COL in rows[0])) throw new Error("단일 값 시트 형식이 아닙니다");
       const parsed = JSON.parse(rows[0][SCALAR_COL]);
+      if (current && typeof current === "object" && "우리" in current && (typeof parsed === "number" || (parsed && typeof parsed === "object"))) return normalizeOpening(parsed);
       if (current && typeof current === "object" && "d10" in current && (typeof parsed === "number" || (parsed && typeof parsed === "object"))) return normalizeBudget(parsed);
       if (typeof parsed !== typeof current) throw new Error("값의 형식이 기존과 다릅니다");
       return parsed;
@@ -3770,7 +3853,7 @@ function AppShell({ userEmail, onSignOut }) {
     { label: "출금", value: withdrawals, set: setWithdrawals },
     { label: "법인카드", value: cards, set: setCards },
     { label: "통장거래", value: bankTxns, set: setBankTxns },
-    { label: "통장기초잔액", value: bankOpening, set: setBankOpening },
+    { label: "통장기초잔액", value: normalizeOpening(bankOpening), set: setBankOpening },
     { label: "TODO", value: todos, set: setTodos },
     { label: "업무체크리스트", value: checklist, set: setChecklist },
     { label: "OKR", value: okrs, set: setOkrs },
